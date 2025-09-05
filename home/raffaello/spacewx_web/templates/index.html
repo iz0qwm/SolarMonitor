@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+    .badge { padding:4px 8px; border-radius:12px; background:#eef; }
+    .cards { display:grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap:12px; }
+    .card { border:1px solid #ddd; border-radius:12px; padding:12px; box-shadow:0 1px 4px rgba(0,0,0,.05); }
+    canvas { width:100%; height:280px; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid #eee; padding:6px; text-align:left; font-size:14px;}
+  </style>
+</head>
+<body>
+  <header>
+    <h2>{{ title }}</h2>
+    <span id="kp-badge" class="badge">Kp: —</span>
+    <span id="rows-badge" class="badge">rows: —</span>
+  </header>
+
+  <div class="cards">
+    <div class="card">
+      <h3>Noise 2.4 GHz (dBm)</h3>
+      <canvas id="noise24"></canvas>
+    </div>
+    <div class="card">
+      <h3>Noise 5.8 GHz (dBm)</h3>
+      <canvas id="noise58"></canvas>
+    </div>
+    <div class="card">
+      <h3>Busy ratio 2.4 GHz</h3>
+      <canvas id="busy24"></canvas>
+    </div>
+    <div class="card">
+      <h3>Busy ratio 5.8 GHz</h3>
+      <canvas id="busy58"></canvas>
+    </div>
+    <div class="card">
+      <h3>Scan p50 RSSI 2.4 GHz</h3>
+      <canvas id="scan24"></canvas>
+    </div>
+    <div class="card">
+      <h3>Scan p50 RSSI 5.8 GHz</h3>
+      <canvas id="scan58"></canvas>
+    </div>
+    <div class="card">
+      <h3>Kp (ultimo valore)</h3>
+      <canvas id="kp"></canvas>
+    </div>
+    <div class="card">
+      <h3>Evidenze Quiet vs Storm</h3>
+      <table id="ev-table"><thead>
+        <tr><th>Banda</th><th>Metrica</th><th>Quiet med</th><th>Storm med</th><th>Δ</th></tr>
+      </thead><tbody></tbody></table>
+      <small>Le mediane richiedono dati sufficienti in entrambi i regimi.</small>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
+
