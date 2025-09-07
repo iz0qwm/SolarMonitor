@@ -120,8 +120,8 @@ Questa configurazione hardware permette di raccogliere in tempo reale sia i para
    │  (posizione,   │      │  (scan 2.4/5.8G) │
    │  DOP, C/N₀)    │      │  noise, busy)    │
    └───────┬────────┘      └────────┬─────────┘
-           │                         │
-           ▼                         ▼
+           │                        │
+           ▼                        ▼
       ┌──────────────────────────────────────┐
       │          Raspberry Pi (logger)       │
       │  - raccoglie dati GPS + RF           │
