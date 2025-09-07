@@ -38,7 +38,7 @@ Obiettivo: **capire e documentare come le condizioni spaziali e ionosferiche inf
         └───────────────┬─────────────────┘
                         ▼
              Affidabilità link drone ↓
-  (controllo/video meno robusti, rischio failsafe o ATTI mode ↑)
+  (controllo/video meno robusti, rischio failsafe ↑)
 ```
 
 ---
@@ -98,11 +98,50 @@ tec,tec_source
 
 ---
 
+
+## 🛠️ Hardware utilizzato
+
+L’intero sistema è stato implementato su una **Raspberry Pi**, scelta per la sua compattezza ed efficienza energetica.
+
+Sono collegati i seguenti dispositivi:
+
+- 📍 **GPS esterno USB** → fornisce dati accurati di posizione, altitudine, DOP e qualità segnale satellitare (C/N₀).
+- 📶 **Chiavetta WiFi USB** (chipset compatibile con modalità monitor) → consente di analizzare rumore di fondo, occupazione canali e distribuzione dei segnali nelle bande **2.4 GHz** e **5.8 GHz**.
+- ⚡ Alimentazione stabile → necessaria per evitare undervoltage durante logging continuo.
+
+Questa configurazione hardware permette di raccogliere in tempo reale sia i parametri GPS sia le condizioni RF locali, correlati con i dati di space weather (Kp, TEC).
+
+
+### 🔌 Schema hardware & flusso dati
+
+```text
+   ┌────────────────┐      ┌──────────────────┐
+   │   GPS USB      │      │  Chiavetta WiFi  │
+   │  (posizione,   │      │  (scan 2.4/5.8G) │
+   │  DOP, C/N₀)    │      │  noise, busy)    │
+   └───────┬────────┘      └────────┬─────────┘
+           │                         │
+           ▼                         ▼
+      ┌──────────────────────────────────────┐
+      │          Raspberry Pi (logger)       │
+      │  - raccoglie dati GPS + RF           │
+      │  - integra Kp/TEC da API             │
+      │  - scrive CSV e invia al DB          │
+      └───────────────────┬──────────────────┘
+                          │
+                          ▼
+              ┌─────────────────────┐
+              │   Dashboard Web     │
+              │ (grafici Kp/TEC/RF) │
+              └─────────────────────┘
+```
+
 ## 🧱 Roadmap sintetica
 
 - [ ] Dashboard comparativa Kp/TEC vs GPS/RF.
 - [ ] Allerte soglia (es. Kp≥5, noise_dbm>-85 dBm, busy_ratio>60%).
 - [ ] Esportazione dataset/plot per analisi esterne.
+
 ---
 ## 🖼️ Interfaccia
 
