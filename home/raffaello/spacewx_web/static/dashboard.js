@@ -6,6 +6,35 @@ const prevDayBtn = document.getElementById('prevDayBtn');
 const nextDayBtn = document.getElementById('nextDayBtn');
 const dayLabel   = document.getElementById('dayLabel');
 
+function colorForKp(kp){
+  if (!Number.isFinite(kp)) return {bg:'#eef6ff', fg:'#111', label:'—'};
+  // Mappa richiesta:
+  // Kp < 5 → Verde
+  // Kp = 5 (G1) → Giallo
+  // Kp = 6 (G2) → Arancio chiaro
+  // Kp = 7 (G3) → Arancione
+  // Kp = 8, 9- (G4) → Rosso chiaro
+  // Kp = 9o (G5) → Rosso (interpreto 9.0 pieno)
+  if (kp < 5)           return {bg:'#C7F2C8', fg:'#0B3D0B', label:`${kp}`};       // verde
+  if (kp === 5)         return {bg:'#FFF3B0', fg:'#5C4800', label:`${kp} (G1)`};  // giallo
+  if (kp === 6)         return {bg:'#FFD8A8', fg:'#5A3A00', label:`${kp} (G2)`};  // arancio chiaro
+  if (kp === 7)         return {bg:'#FFC078', fg:'#5A2A00', label:`${kp} (G3)`};  // arancione
+  if (kp >= 8 && kp < 9)return {bg:'#FFA8A8', fg:'#5A0B0B', label:`${kp} (G4)`};  // rosso chiaro
+  if (kp >= 9)          return {bg:'#FF6B6B', fg:'#fff',    label:`${kp} (G5)`};  // rosso pieno
+  return {bg:'#eef6ff', fg:'#111', label:`${kp}`};
+}
+
+function colorForTEC(tec){
+  // TECu:
+  // Quiet: <125 → Verde
+  // Moderate: >=125 → Arancione
+  // Severe: >=175 → Rosso
+  if (!Number.isFinite(tec)) return {bg:'#f6efff', fg:'#111', label:'—'};
+  if (tec < 125)  return {bg:'#C7F2C8', fg:'#0B3D0B', label:`${tec.toFixed(0)} TECu (Quiet)`};
+  if (tec < 175)  return {bg:'#FFC078', fg:'#5A2A00', label:`${tec.toFixed(0)} TECu (Moderate)`};
+  return            {bg:'#FF6B6B', fg:'#fff',          label:`${tec.toFixed(0)} TECu (Severe)`};
+}
+
 function setDay(dStr){ // dStr può essere null (modalità "live")
   currentDay = dStr;
   if (dayPicker) dayPicker.value = dStr || "";
@@ -212,28 +241,52 @@ async function refreshAll(){
   ]);
 
   // Badge
-  document.getElementById('kp-badge').textContent  = `Kp: ${summary?.summary?.kplast ?? "—"}`;
-  document.getElementById('tec-badge').textContent = `TEC: ${latest?.latest?.tec ?? "—"} (${latest?.latest?.tec_source || "—"})`;
+  // Badge Kp
+  const kpVal = summary?.summary?.kplast;
+  const kpB = document.getElementById('kp-badge');
+  if (kpB){
+    const c = colorForKp(Number(kpVal));
+    kpB.textContent = `Kp: ${c.label}`;
+    kpB.style.background = c.bg;
+    kpB.style.color = c.fg;
+  }
 
+  // Badge TEC
+  const tecVal = Number(latest?.latest?.tec);
+  const tecSrc = latest?.latest?.tec_source || "—";
+  const tecB = document.getElementById('tec-badge');
+  if (tecB){
+    const c = colorForTEC(tecVal);
+    tecB.textContent = Number.isFinite(tecVal) ? `TEC: ${c.label} (${tecSrc})` : `TEC: — (${tecSrc})`;
+    tecB.style.background = c.bg;
+    tecB.style.color = c.fg;
+  }
+
+  // Badge Posizione
   const lat = latest?.latest?.lat, lon = latest?.latest?.lon;
   const fix = latest?.latest?.gps_fix ?? "—";
   const hasPos = Number.isFinite(lat) && Number.isFinite(lon);
-  document.getElementById('pos-badge').textContent = hasPos
-    ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
-    : `Pos: — (${fix})`;
-
-
-  // Help panel (riempi una sola volta)
-  const helpBody = document.getElementById('help-body');
-  if (helpBody && !helpBody.dataset.filled && glossary?.items) {
-    helpBody.innerHTML = glossary.items.map(item =>
-      `<div style="margin:6px 0;">
-         <b>${item.label}</b> <code style="color:#667">${item.field}</code><br/>
-         <span style="color:#333">${item.desc}</span>
-       </div>`
-    ).join('');
-    helpBody.dataset.filled = "1";
+  const posB = document.getElementById('pos-badge');
+  if (posB){
+    posB.textContent = hasPos
+      ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
+      : `Pos: — (${fix})`;
   }
+
+
+
+  // Help panel (riempi una sola volta il GLOSSARIO, senza toccare i badge)
+  const helpGloss = document.getElementById('help-glossary') || document.getElementById('help-body');
+  if (helpGloss && !helpGloss.dataset.filled && glossary?.items) {
+    helpGloss.innerHTML = glossary.items.map(item =>
+      `<div style="margin:6px 0;">
+        <b>${item.label}</b> <code style="color:#667">${item.field}</code><br/>
+        <span style="color:#333">${item.desc}</span>
+      </div>`
+    ).join('');
+    helpGloss.dataset.filled = "1";
+  }
+
 
   // Grafici GPS
   upsertLine('tec',   'TEC',          tecSeries?.points  || []);
@@ -265,12 +318,28 @@ async function refreshAll(){
 }
 
 
-// Help panel toggle
+// Help panel toggle (unico listener)
 document.getElementById('help-btn')?.addEventListener('click', ()=>{
   const el = document.getElementById('help');
   if (!el) return;
-  el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+  const visible = getComputedStyle(el).display !== 'none';
+  el.style.display = visible ? 'none' : 'block';
 });
+
+// Chiudi dalla 'X'
+document.getElementById('help-close')?.addEventListener('click', () => {
+  const el = document.getElementById('help');
+  if (el) el.style.display = 'none';
+});
+
+// Chiudi con ESC
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') {
+    const el = document.getElementById('help');
+    if (el && getComputedStyle(el).display !== 'none') el.style.display = 'none';
+  }
+});
+
 
 refreshAll();
 setInterval(refreshAll, 60_000); // refresh ogni minuto

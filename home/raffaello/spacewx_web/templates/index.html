@@ -28,11 +28,11 @@
     th, td { border-bottom:1px solid #eee; padding:6px; text-align:left; }
     .toolbar { margin-left:auto; display:flex; gap:8px; align-items:center; }
     .iconbtn { border:1px solid #ddd; background:#fff; border-radius:10px; padding:6px 10px; cursor:pointer; }
-    .help-panel { position:fixed; inset:auto 16px 16px auto; max-width:420px; max-height:70vh; overflow:auto; background:#fff; border:1px solid #ddd; border-radius:12px; padding:12px; box-shadow:0 10px 30px rgba(0,0,0,.15); display:none; }
-    .help-panel h4 { margin:0 0 8px 0; }
     #map { width:100%; height:420px; border-radius:14px; border:1px solid #ddd; }
     small.muted { color: var(--muted); }
 
+    .badge { padding:6px 10px; border-radius:999px; background:#eef; font-size:14px; }
+    .badge.kp, .badge.tec { color: #111; }
 
     .day-bar{
       position: sticky; top: 0; z-index: 1200;
@@ -46,30 +46,88 @@
     /* Assicurati che il contenitore mappa NON abbia z-index super-alto */
     #map { position: relative; z-index: 1; }
 
-    /* Pannello aiuto sopra tutto */
-    #helpPanel{
-      position: fixed; /* o absolute se preferisci dentro un container */
-      right: 1rem; top: 5rem;
+    header { display:flex; align-items:flex-start; gap:12px; margin-bottom:12px; flex-wrap: wrap; }
+    header .title { flex: 1 0 100%; }             /* forza a nuova riga */
+    header .status-row { display:flex; gap:12px; align-items:center; width:100%; }
+    .toolbar { margin-left:auto; display:flex; gap:8px; align-items:center; } /* già presente, ok */
+
+
+    
+    /* Pannello Aiuto: a DESTRA, sotto header/day-bar */
+    .help-panel{
+      position: fixed;
+      right: 1rem;        /* → destra */
+      left: auto;
+      top: 9rem;          /* sotto header + day bar */
       max-width: 480px;
-      background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 10px 24px rgba(0,0,0,.12);
-      z-index: 3000;  /* > mappa */
-      padding: 1rem;
+      max-height: 70vh;
+      overflow: auto;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 12px 40px 12px 12px;  /* spazio per la 'X' */
+      box-shadow: 0 10px 30px rgba(0,0,0,.15);
+      z-index: 3000;
+      display: none;
     }
-    #helpPanel[hidden]{ display: none; }
+    .help-panel .close-btn{
+      position: absolute; top: 6px; right: 8px;
+      font-size: 20px; line-height: 1;
+      background: transparent; border: none; cursor: pointer; padding: 4px 6px;
+    }
+    .help-panel .close-btn:focus { outline: 2px solid #555; border-radius: 6px; }
+
+    small.muted { max-width: 1100px; }
+
+    /* Chip colore nel pannello Help */
+    .chip{
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid rgba(0,0,0,.06);
+      margin-left: .35rem;
+    }
+    .chip-green  { background:#C7F2C8; color:#0B3D0B; }
+    .chip-yellow { background:#FFF3B0; color:#5C4800; }
+    .chip-lo     { background:#FFD8A8; color:#5A3A00; } /* light orange */
+    .chip-orange { background:#FFC078; color:#5A2A00; }
+    .chip-lred   { background:#FFA8A8; color:#5A0B0B; }
+    .chip-red    { background:#FF6B6B; color:#fff; }
+    .help-panel h5{ margin:10px 0 6px 0; }
+    .help-panel ul{ margin: 6px 0 10px 1.1rem; padding:0; }
+    .help-footer{ margin-top:10px; }
+    .help-footer a{ text-decoration:none; }
+
 
   </style>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 </head>
 <body>
   <header>
-    <h2 style="margin:0;">{{ title }}</h2>
-    <span id="kp-badge" class="badge kp">Kp: —</span>
-    <span id="tec-badge" class="badge tec">TEC: —</span>
-    <span id="pos-badge" class="badge pos">Pos: —</span>
-    <div class="toolbar">
-      <button id="help-btn" class="iconbtn" title="Cos'è ogni campo?">❓ Aiuto</button>
+    <div class="title">
+      <h2 style="margin:0;">{{ title }}</h2>
+      <small class="muted" style="display:block; margin-top:4px; line-height:1.35;">
+        Pagina di utilità per piloti remoti di UAV.<br>
+        Monitor locale di qualità GPS/GNSS (TEC, DOP, satelliti) e rumore/occupazione Wi-Fi.<br>
+        L’indice <strong>Kp</strong> misura l’attività geomagnetica (tempeste solari), ma alle medie latitudini non sempre anticipa disturbi al GPS.<br>
+        Il <strong>TEC</strong> (Total Electron Content) è più direttamente legato alla propagazione ionosferica e quindi all’accuratezza GNSS. Le bande 2.4/5-6 GHz degli UAV sono in genere poco influenzate, ma le monitoriamo per correlare eventuali degradi locali.
+      </small>
+    </div>
+
+
+    <div class="status-row">
+      <span id="kp-badge"  class="badge kp"  title="Kp: indice di attività geomagnetica (tempeste solari).">Kp: —</span>
+      <span id="tec-badge" class="badge tec" title="TEC: contenuto elettronico ionosferico (più legato a precisione/affidabilità GNSS).">TEC: —</span>
+      <span id="pos-badge" class="badge pos" title="Fix e coordinate GNSS locali.">Pos: —</span>
+
+      <div class="toolbar">
+        <button id="help-btn" class="iconbtn" title="Cos'è ogni campo?">❓ Aiuto</button>
+      </div>
     </div>
   </header>
+
+
 
   <!-- Top day navigator -->
   <div id="dayBar" class="day-bar">
@@ -116,9 +174,44 @@
 
   <!-- Help / Glossario -->
   <div id="help" class="help-panel">
-    <h4>Glossario campi</h4>
-    <div id="help-body"><small class="muted">Caricamento…</small></div>
+    <button id="help-close" class="close-btn" aria-label="Chiudi pannello">×</button>
+    <h4>Guida rapida & Glossario</h4>
+
+    <!-- Sezione fissa: Come leggere i badge -->
+    <section id="help-badges">
+      <h5>Come leggere i badge</h5>
+
+      <p><b>Kp</b> — indice di attività geomagnetica (tempeste solari), utile come contesto generale.</p>
+      <ul>
+        <li>Kp &lt; 5 <span class="chip chip-green">Verde</span></li>
+        <li>Kp = 5 (G1) <span class="chip chip-yellow">Giallo</span></li>
+        <li>Kp = 6 (G2) <span class="chip chip-lo">Arancio chiaro</span></li>
+        <li>Kp = 7 (G3) <span class="chip chip-orange">Arancione</span></li>
+        <li>Kp = 8, 9− (G4) <span class="chip chip-lred">Rosso chiaro</span></li>
+        <li>Kp = 9.0 (G5) <span class="chip chip-red">Rosso</span></li>
+      </ul>
+
+      <p><b>TEC (TECu)</b> — contenuto totale di elettroni nella ionosfera, più correlato a errori/instabilità GNSS.</p>
+      <ul>
+        <li><b>Quiet</b>: sTEC &lt; 125 <span class="chip chip-green">Verde</span></li>
+        <li><b>Moderate</b>: sTEC ≥ 125 <span class="chip chip-orange">Arancione</span></li>
+        <li><b>Severe</b>: sTEC ≥ 175 <span class="chip chip-red">Rosso</span></li>
+      </ul>
+      <hr>
+    </section>
+
+    <!-- Sezione dinamica: Glossario (riempita da dashboard.js) -->
+    <h5>Glossario campi</h5>
+    <div id="help-glossary"><small class="muted">Caricamento…</small></div>
+
+    <hr>
+    <div class="help-footer">
+      <a href="https://github.com/iz0qwm/SolarMonitor/" target="_blank" rel="noopener">
+        Codice sorgente su GitHub: iz0qwm/SolarMonitor ↗
+      </a>
+    </div>
   </div>
+
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
   <!-- <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script> -->
