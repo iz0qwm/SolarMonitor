@@ -1,6 +1,98 @@
 // dashboard.js
 
+let currentDay = null; // string "YYYY-MM-DD" oppure null per "finestra scorrevole"
+const dayPicker = document.getElementById('dayPicker');
+const prevDayBtn = document.getElementById('prevDayBtn');
+const nextDayBtn = document.getElementById('nextDayBtn');
+const dayLabel   = document.getElementById('dayLabel');
+
+function setDay(dStr){ // dStr può essere null (modalità "live")
+  currentDay = dStr;
+  if (dayPicker) dayPicker.value = dStr || "";
+  if (dayLabel){
+    dayLabel.textContent = dStr ? `Giorno selezionato: ${dStr}` : "In tempo reale (ultima finestra)";
+  }
+  refreshAll();
+}
+
+function shiftDay(delta){ // delta = ±1 giorni
+  let d = currentDay ? new Date(currentDay) : new Date();
+  d.setUTCDate(d.getUTCDate() + delta);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth()+1).padStart(2,'0');
+  const dd= String(d.getUTCDate()).padStart(2,'0');
+  setDay(`${y}-${m}-${dd}`);
+}
+
+// init day controls
+if (dayPicker){
+  dayPicker.addEventListener('change', e => {
+    setDay(e.target.value || null);
+  });
+}
+if (prevDayBtn){ prevDayBtn.addEventListener('click', () => shiftDay(-1)); }
+if (nextDayBtn){ nextDayBtn.addEventListener('click', () => shiftDay(+1)); }
+// all’avvio mostra “oggi” come default navigabile
+(function initDay(){
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth()+1).padStart(2,'0');
+  const dd= String(now.getUTCDate()).padStart(2,'0');
+  setDay(`${y}-${m}-${dd}`);
+})();
+
+
+
 async function fetchJSON(url){ const r=await fetch(url); return await r.json(); }
+
+function q(params){
+  // helper per serializzare query
+  return Object.entries(params).filter(([,v]) => v !== undefined && v !== null && v !== "")
+    .map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+}
+
+async function loadSummary(){
+  const url = `/api/summary?` + q({
+    day: currentDay || undefined,
+    minutes: currentDay ? 1440 : 4320
+  });
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function loadSeries(metric, opts={}){
+  const url = `/api/series?` + q({
+    metric,
+    band: opts.band,
+    agg:  opts.agg,
+    window: opts.window,
+    day: currentDay || undefined,
+    minutes: currentDay ? 1440 : (opts.minutes || 4320)
+  });
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function loadSeriesGps(metric, opts={}){
+  const url = `/api/series_gps?` + q({
+    metric,
+    agg:  opts.agg,
+    window: opts.window,
+    day: currentDay || undefined,
+    minutes: currentDay ? 1440 : (opts.minutes || 4320)
+  });
+  const r = await fetch(url);
+  return r.json();
+}
+
+async function loadGpsTrack(minutes=180){
+  const url = `/api/gps_track?` + q({
+    day: currentDay || undefined,
+    minutes: currentDay ? 1440 : minutes
+  });
+  const r = await fetch(url);
+  return r.json();
+}
 
 // cache grafici
 const charts = {};
@@ -76,29 +168,51 @@ function ensureMap(){
 }
 
 async function refreshAll(){
-  const minutes = 24*60*3; // ultimi 3 giorni
-  const shortM  = 180;     // 3 ore per la traccia
+  const minutesParam = currentDay ? 1440 : 4320; // 1 giorno se selezionato, 3 giorni se live
+  const shortM       = currentDay ? 1440 : 180;  // per la traccia GPS
+  const agg          = currentDay ? "median" : "";
+  const win          = currentDay ? "5min"  : "";
 
-  // Summary + latest + glossary
-  const [sum, latest, glossary] = await Promise.all([
-    fetchJSON(`/api/summary`),
-    fetchJSON(`/api/latest`),
-    fetchJSON(`/api/glossary`),
+  const [
+    summary, latest, glossary,
+    tecSeries, hdopSeries, pdopSeries, vdopSeries, cn0Series, svuSeries,
+    noise24Series, noise58Series, scan24Series, scan58Series, kpSeries,
+    track
+  ] = await Promise.all([
+    loadSummary(),
+    fetchJSON('/api/latest'),
+    fetchJSON('/api/glossary'),
+
+    loadSeriesGps("tec",      { agg, window: win, minutes: minutesParam }),
+    loadSeriesGps("hdop",     { agg, window: win, minutes: minutesParam }),
+    loadSeriesGps("pdop",     { agg, window: win, minutes: minutesParam }),
+    loadSeriesGps("vdop",     { agg, window: win, minutes: minutesParam }),
+    loadSeriesGps("cn0_mean", { agg, window: win, minutes: minutesParam }),
+    loadSeriesGps("sv_used",  { agg, window: win, minutes: minutesParam }),
+
+    loadSeries("noise_dbm", { band:"24", agg, window: win, minutes: minutesParam }),
+    loadSeries("noise_dbm", { band:"58", agg, window: win, minutes: minutesParam }),
+    loadSeries("scan_p50",  { band:"24", agg, window: win, minutes: minutesParam }),
+    loadSeries("scan_p50",  { band:"58", agg, window: win, minutes: minutesParam }),
+    loadSeries("kp",        { minutes: minutesParam }),
+
+    loadGpsTrack(shortM)
   ]);
 
-  // Badges
-  document.getElementById('kp-badge').textContent  = `Kp: ${sum?.summary?.kplast ?? "—"}`;
+  // Badge
+  document.getElementById('kp-badge').textContent  = `Kp: ${summary?.summary?.kplast ?? "—"}`;
   document.getElementById('tec-badge').textContent = `TEC: ${latest?.latest?.tec ?? "—"} (${latest?.latest?.tec_source || "—"})`;
+
   const lat = latest?.latest?.lat, lon = latest?.latest?.lon;
   const fix = latest?.latest?.gps_fix ?? "—";
   document.getElementById('pos-badge').textContent = (lat && lon)
       ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
       : `Pos: — (${fix})`;
 
-  // Help panel fill (lazy, only once)
+  // Help panel (riempi una sola volta)
   const helpBody = document.getElementById('help-body');
-  if (helpBody && !helpBody.dataset.filled) {
-    helpBody.innerHTML = (glossary.items || []).map(item =>
+  if (helpBody && !helpBody.dataset.filled && glossary?.items) {
+    helpBody.innerHTML = glossary.items.map(item =>
       `<div style="margin:6px 0;">
          <b>${item.label}</b> <code style="color:#667">${item.field}</code><br/>
          <span style="color:#333">${item.desc}</span>
@@ -107,44 +221,26 @@ async function refreshAll(){
     helpBody.dataset.filled = "1";
   }
 
-  // Charts: TEC + GPS
-  const [tec, hdop, pdop, vdop, cn0, svu] = await Promise.all([
-    fetchJSON(`/api/series_gps?metric=tec&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series_gps?metric=hdop&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series_gps?metric=pdop&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series_gps?metric=vdop&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series_gps?metric=cn0_mean&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series_gps?metric=sv_used&minutes=${minutes}&agg=median&window=5min`),
-  ]);
+  // Grafici GPS
+  upsertLine('tec',   'TEC',          tecSeries?.points  || []);
+  upsertLine('hdop',  'HDOP',         hdopSeries?.points || []);
+  upsertLine('pdop',  'PDOP',         pdopSeries?.points || []);
+  upsertLine('vdop',  'VDOP',         vdopSeries?.points || []);
+  upsertLine('cn0',   'C/N0',         cn0Series?.points  || []);
+  upsertLine('svused','SV used',      svuSeries?.points  || []);
 
-  upsertLine('tec',   'TEC', tec.points || []);
-  upsertLine('hdop',  'HDOP', hdop.points || []);
-  upsertLine('pdop',  'PDOP', pdop.points || []);
-  upsertLine('vdop',  'VDOP', vdop.points || []);
-  upsertLine('cn0',   'C/N0', cn0.points || []);
-  upsertLine('svused','SV used', svu.points || []);
+  // Grafici RF
+  upsertLine('noise24', 'noise dBm',     noise24Series?.points || []);
+  upsertLine('noise58', 'noise dBm',     noise58Series?.points || []);
+  upsertLine('scan24',  'scan p50 RSSI', scan24Series?.points  || []);
+  upsertLine('scan58',  'scan p50 RSSI', scan58Series?.points  || []);
+  upsertLine('kp',      'Kp',            kpSeries?.points       || []);
 
-  // Charts: RF
-  const [n24, n58, s24, s58, kp] = await Promise.all([
-    fetchJSON(`/api/series?metric=noise_dbm&band=24&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series?metric=noise_dbm&band=58&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series?metric=scan_p50&band=24&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series?metric=scan_p50&band=58&minutes=${minutes}&agg=median&window=5min`),
-    fetchJSON(`/api/series?metric=kp&minutes=${minutes}`),
-  ]);
-
-  upsertLine('noise24', 'noise dBm',     n24.points || []);
-  upsertLine('noise58', 'noise dBm',     n58.points || []);
-  upsertLine('scan24',  'scan p50 RSSI', s24.points || []);
-  upsertLine('scan58',  'scan p50 RSSI', s58.points || []);
-  upsertLine('kp',      'Kp',            kp.points  || []);
-
-  // Map + trail
+  // Mappa + trail
   ensureMap();
-  const track = await fetchJSON(`/api/gps_track?minutes=${shortM}`);
-  const coords = (track.points || []).map(p => [p.lat, p.lon]).filter(a => a[0] && a[1]);
+  const coords = (track?.points || []).map(p => [p.lat, p.lon]).filter(a => a[0] && a[1]);
   if (coords.length){
-    marker.setLatLng(coords[coords.length-1]);
+    marker.setLatLng(coords.at(-1));
     trail.setLatLngs(coords);
     map.fitBounds(trail.getBounds(), { padding: [20,20] });
   } else if (lat && lon) {
@@ -153,6 +249,7 @@ async function refreshAll(){
     map.setView([lat,lon], 16);
   }
 }
+
 
 // Help panel toggle
 document.getElementById('help-btn')?.addEventListener('click', ()=>{

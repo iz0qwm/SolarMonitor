@@ -5,40 +5,62 @@ async function fetchJSON(url){ const r=await fetch(url); return await r.json(); 
 // cache grafici
 const charts = {};
 
-function upsertLine(canvasId, label, points){
+function upsertLine(canvasId, label, points) {
   const ctx = document.getElementById(canvasId).getContext('2d');
-  const dataPoints = (points || []).map(([t,v]) => ({ x: new Date(t), y: v }));
 
-  if (charts[canvasId]) {
-    charts[canvasId].data.datasets[0].data = dataPoints;
-    charts[canvasId].data.datasets[0].label = label;
-    charts[canvasId].update();
-    return charts[canvasId];
-  }
+  // Convertiamo timestamp ISO → millisecondi
+  const dataPoints = (points || []).map(([t, v]) => {
+    const ms = Date.parse(t);
+    return { x: isNaN(ms) ? null : ms, y: v };
+  }).filter(p => p.x !== null);
 
-  charts[canvasId] = new Chart(ctx, {
-    type: 'line',
-    data: {
-      datasets: [{
-        label,
-        data: dataPoints,
-        pointRadius: 0,
-        borderWidth: 1.5,
-        tension: 0.2
-      }]
-    },
-    options: {
-      parsing: false,
-      scales: {
-        x: { type: 'time', time: { unit: 'hour' } },
-        y: { beginAtZero: false }
+  if (!window._charts) window._charts = {};
+  const existing = window._charts[canvasId];
+
+  if (existing) {
+    // aggiorna dati
+    existing.data.datasets[0].data = dataPoints;
+    existing.update();
+  } else {
+    // crea grafico nuovo
+    window._charts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        datasets: [{
+          label: label,
+          data: dataPoints,
+          borderColor: 'blue',
+          fill: false,
+          pointRadius: 2
+        }]
       },
-      plugins: { legend: { display: false } },
-      animation: false
-    }
-  });
-  return charts[canvasId];
+      options: {
+        parsing: false, // importante per usare {x,y}
+        scales: {
+          x: {
+            type: 'linear',
+            ticks: {
+              callback: (val) => {
+                // val = ms, convertiamo a HH:mm
+                const d = new Date(val);
+                return d.toLocaleTimeString('it-IT', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                });
+              },
+              autoSkip: true,
+              maxRotation: 0
+            }
+          },
+          y: {
+            beginAtZero: false
+          }
+        }
+      }
+    });
+  }
 }
+
 
 // Leaflet map
 let map, marker, trail;
@@ -87,12 +109,12 @@ async function refreshAll(){
 
   // Charts: TEC + GPS
   const [tec, hdop, pdop, vdop, cn0, svu] = await Promise.all([
-    fetchJSON(`/api/series_gps?metric=tec&minutes=${minutes}`),
-    fetchJSON(`/api/series_gps?metric=hdop&minutes=${minutes}`),
-    fetchJSON(`/api/series_gps?metric=pdop&minutes=${minutes}`),
-    fetchJSON(`/api/series_gps?metric=vdop&minutes=${minutes}`),
-    fetchJSON(`/api/series_gps?metric=cn0_mean&minutes=${minutes}`),
-    fetchJSON(`/api/series_gps?metric=sv_used&minutes=${minutes}`),
+    fetchJSON(`/api/series_gps?metric=tec&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series_gps?metric=hdop&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series_gps?metric=pdop&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series_gps?metric=vdop&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series_gps?metric=cn0_mean&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series_gps?metric=sv_used&minutes=${minutes}&agg=median&window=5min`),
   ]);
 
   upsertLine('tec',   'TEC', tec.points || []);
@@ -104,10 +126,10 @@ async function refreshAll(){
 
   // Charts: RF
   const [n24, n58, s24, s58, kp] = await Promise.all([
-    fetchJSON(`/api/series?metric=noise_dbm&band=24&minutes=${minutes}`),
-    fetchJSON(`/api/series?metric=noise_dbm&band=58&minutes=${minutes}`),
-    fetchJSON(`/api/series?metric=scan_p50&band=24&minutes=${minutes}`),
-    fetchJSON(`/api/series?metric=scan_p50&band=58&minutes=${minutes}`),
+    fetchJSON(`/api/series?metric=noise_dbm&band=24&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series?metric=noise_dbm&band=58&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series?metric=scan_p50&band=24&minutes=${minutes}&agg=median&window=5min`),
+    fetchJSON(`/api/series?metric=scan_p50&band=58&minutes=${minutes}&agg=median&window=5min`),
     fetchJSON(`/api/series?metric=kp&minutes=${minutes}`),
   ]);
 

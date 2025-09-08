@@ -6,7 +6,6 @@ import math
 from collections import deque, defaultdict  # se già non presenti
 from urllib.parse import quote  # in testa, vicino agli import
 from bisect import bisect_right
-import gzip, shutil
 
 # Endpoint INGV (puoi sovrascriverlo via env se cambia)
 TEC_INGV_URL_TEMPLATE = os.environ.get(
@@ -24,59 +23,9 @@ GPSD_PORT = int(os.environ.get("GPSD_PORT","2947"))
 WLAN = os.environ.get("WLAN_IF","wlan1")
 KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 
-# --- ROTATION & HOUSEKEEPING (aggiungi sopra a main) ---
-RAW_KEEP_DAYS = int(os.environ.get("RAW_KEEP_DAYS", "7"))   # giorni di raw da tenere
-LOGDIR = os.path.expanduser("~/spacewx_logs")               # già definito nel tuo file
-BASE = "wifi_gps_kp_qos"
-
-def daily_csv_path(dt_utc=None):
-    dt_utc = dt_utc or datetime.now(timezone.utc)
-    y, m, d = dt_utc.strftime("%Y"), dt_utc.strftime("%m"), dt_utc.strftime("%d")
-    daydir = os.path.join(LOGDIR, "daily", y, m)
-    os.makedirs(daydir, exist_ok=True)
-    return os.path.join(daydir, f"{BASE}_{y}{m}{d}.csv")
-
-def compress_and_remove(path_csv):
-    if not os.path.exists(path_csv): return
-    gz = path_csv + ".gz"
-    with open(path_csv, "rb") as f_in, gzip.open(gz, "wb") as f_out:
-        shutil.copyfileobj(f_in, f_out)
-    os.remove(path_csv)
-
-def housekeeping():
-    # 1) comprime il file di ieri se esiste ancora “plain”
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-    y_csv = daily_csv_path(yesterday)
-    if os.path.exists(y_csv):
-        try:
-            compress_and_remove(y_csv)
-            print(f"[HK] compressed {y_csv}")
-        except Exception as e:
-            print(f"[HK] compress error {y_csv}: {e}")
-
-    # 2) retention: cancella raw .csv.gz più vecchi di RAW_KEEP_DAYS
-    cutoff = datetime.now(timezone.utc) - timedelta(days=RAW_KEEP_DAYS)
-    for root, _, files in os.walk(os.path.join(LOGDIR, "daily")):
-        for fn in files:
-            if not fn.startswith(BASE) or not fn.endswith(".csv.gz"):
-                continue
-            p = os.path.join(root, fn)
-            try:
-                # parse YYYYMMDD
-                stamp = fn.replace(BASE + "_", "").replace(".csv.gz", "")
-                dt = datetime.strptime(stamp, "%Y%m%d").replace(tzinfo=timezone.utc)
-                if dt < cutoff:
-                    os.remove(p)
-                    print(f"[HK] removed old raw {p}")
-            except Exception:
-                pass
-
-
-
-
-# Temporizzazione per recupero TEC
-#
 def now_iso(): return datetime.now(timezone.utc).isoformat()
+
+
 
 def floor_to_10min(dt_utc):
     m = (dt_utc.minute // 10) * 10
@@ -350,171 +299,122 @@ def band_of(freq):
     return "?"
 
 def main():
-    # --- apre il CSV del giorno corrente e scrive header se nuovo ---
-    cur_path = daily_csv_path()
-    newfile = not os.path.exists(cur_path)
-    f = open(cur_path, "a", newline="")
-    w = csv.writer(f)
-    if newfile:
-        w.writerow([
-            "ts_iso","kp","kp_when",
-            "gps_fix","lat","lon","alt","pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
-            "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90","band",
-            "tec","tec_source"
-        ])
-        f.flush()
+    newfile = not os.path.exists(CSV)
+    with open(CSV, "a", newline="") as f:
+        w=csv.writer(f)
+        if newfile:
+            w.writerow(["ts_iso","kp","kp_when",
+                        "gps_fix","lat","lon","alt","pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
+                        "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90","band",
+                        "tec","tec_source"])
+        # gpsd
+        gps_socket = gps3.GPSDSocket()
+        data_stream = gps3.DataStream()
+        gps_socket.connect(GPSD_HOST, GPSD_PORT)
+        gps_socket.watch()
 
-    # --- gpsd ---
-    gps_socket = gps3.GPSDSocket()
-    data_stream = gps3.DataStream()
-    gps_socket.connect(GPSD_HOST, GPSD_PORT)
-    gps_socket.watch()
+        kp=kp_when=None; last_kp=0
+        last_sky = dict(pdop=None, hdop=None, vdop=None, sv_used=None, sv_tot=None, cn0_mean=None)
 
-    kp = kp_when = None
-    last_kp = 0
-    last_sky = dict(pdop=None, hdop=None, vdop=None, sv_used=None, sv_tot=None, cn0_mean=None)
-    last_housekeeping_minute = None
+        while True:
+            now=time.time()
+            # FIX: refresh Kp ogni 5 minuti ma con cache di fallback
+            if now-last_kp > 300:
+                kp, kp_when = get_kp(); last_kp = now
 
-    while True:
-        now = time.time()
+            # FIX: raccogli TPV e SKY per ~1.2s per evitare "buchi"
+            gps_fix="NO"; lat=lon=alt=None
+            got_tpv=False; got_sky=False
+            t_end = now + 1.2
+            while time.time() < t_end:
+                try:
+                    raw = next(gps_socket)
+                except StopIteration:
+                    break
+                if not raw:
+                    continue
+                data_stream.unpack(raw)
 
-        # 1) Rollover a mezzanotte: se cambia il path giornaliero, chiudi, comprimi e riapri
-        new_path = daily_csv_path()
-        if new_path != cur_path:
-            try:
-                f.close()
-            except Exception:
-                pass
-            # comprime il file del giorno appena chiuso
-            try:
-                compress_and_remove(cur_path)
-            except Exception as e:
-                print(f"[HK] compress error at rollover {cur_path}: {e}")
+                # TPV (posizione)
+                if data_stream.TPV:
+                    tpv = data_stream.TPV
+                    if isinstance(tpv, str):
+                        try: tpv = json.loads(tpv)
+                        except Exception: tpv = {}
+                    mode = tpv.get('mode')
+                    lat  = tpv.get('lat')
+                    lon  = tpv.get('lon')
+                    alt  = tpv.get('alt')
+                    gps_fix = "3D" if mode == 3 else ("2D" if mode == 2 else "NO")
+                    got_tpv=True
 
-            # riapre il nuovo giorno e riscrive l'header
-            cur_path = new_path
-            f = open(cur_path, "a", newline="")
-            w = csv.writer(f)
-            w.writerow([
-                "ts_iso","kp","kp_when",
-                "gps_fix","lat","lon","alt","pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
-                "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90","band",
-                "tec","tec_source"
-            ])
+                # SKY (sats/DOP)
+                if data_stream.SKY:
+                    sky = data_stream.SKY
+                    if isinstance(sky, str):
+                        try: sky = json.loads(sky)
+                        except Exception: sky = {}
+
+                    pdop = sky.get('pdop')
+                    hdop = sky.get('hdop')
+                    vdop = sky.get('vdop')
+
+                    sats = sky.get('satellites') or []
+                    norm_sats = []
+                    if isinstance(sats, list):
+                        for s in sats:
+                            if isinstance(s, str):
+                                try: s = json.loads(s)
+                                except Exception: s = None
+                            if isinstance(s, dict): norm_sats.append(s)
+
+                    sv_tot  = len(norm_sats)
+                    sv_used = sum(1 for s in norm_sats if s.get('used') in (True, 1, 'true', 'True'))
+
+                    cn_vals = []
+                    for s in norm_sats:
+                        v = s.get('ss') or s.get('cn0') or s.get('cn') or s.get('snr')
+                        if v is None: continue
+                        try: cn_vals.append(float(v))
+                        except Exception: pass
+
+                    cn0_mean = round(sum(cn_vals)/len(cn_vals), 1) if cn_vals else None
+
+                    last_sky.update(dict(
+                        pdop=pdop, hdop=hdop, vdop=vdop,
+                        sv_used=sv_used, sv_tot=sv_tot, cn0_mean=cn0_mean
+                    ))
+                    got_sky=True
+
+            # Prendiamo i dati TEC
+            ts = now_iso()
+            tec_val, tec_src = get_tec_for(lat, lon, ts)
+            print(f"[TEC] value={tec_val} source={tec_src}")
+
+            # SURVEY: se supportato
+            surv = survey_sample(WLAN)
+            if surv:
+                w.writerow([ts, kp, kp_when,
+                            gps_fix, lat, lon, alt,
+                            last_sky["pdop"], last_sky["hdop"], last_sky["vdop"],
+                            last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
+                            "SURVEY", surv["freq"], surv["noise_dbm"], surv["busy_ratio"],
+                            None, None, None, None, band_of(surv["freq"]),
+                            tec_val, tec_src])
+                f.flush()
+
+            # SCAN a banda larga
+            for row in scan_stats(WLAN):
+                w.writerow([ts, kp, kp_when,
+                            gps_fix, lat, lon, alt,
+                            last_sky["pdop"], last_sky["hdop"], last_sky["vdop"],
+                            last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
+                            "SCAN", row["freq"], None, None,
+                            row["n"], row["p50"], row["p10"], row["p90"], band_of(row["freq"]),
+                            tec_val, tec_src])
             f.flush()
 
-        # 2) Housekeeping leggero: una volta all’ora al minuto 1
-        now_minute = datetime.utcnow().minute
-        if now_minute == 1 and last_housekeeping_minute != 1:
-            housekeeping()
-            last_housekeeping_minute = 1
-        elif now_minute != 1:
-            # reset per far scattare di nuovo al prossimo "minuto 1"
-            last_housekeeping_minute = None
-
-        # 3) Refresh Kp ogni 5 minuti (con cache di fallback)
-        if now - last_kp > 300:
-            kp, kp_when = get_kp()
-            last_kp = now
-
-        # 4) Raccogli TPV e SKY ~1.2s
-        gps_fix = "NO"; lat = lon = alt = None
-        got_tpv = got_sky = False
-        t_end = now + 1.2
-        while time.time() < t_end:
-            try:
-                raw = next(gps_socket)
-            except StopIteration:
-                break
-            if not raw:
-                continue
-            data_stream.unpack(raw)
-
-            # TPV (posizione)
-            if data_stream.TPV:
-                tpv = data_stream.TPV
-                if isinstance(tpv, str):
-                    try: tpv = json.loads(tpv)
-                    except Exception: tpv = {}
-                mode = tpv.get('mode')
-                lat  = tpv.get('lat')
-                lon  = tpv.get('lon')
-                alt  = tpv.get('alt')
-                gps_fix = "3D" if mode == 3 else ("2D" if mode == 2 else "NO")
-                got_tpv = True
-
-            # SKY (sats/DOP)
-            if data_stream.SKY:
-                sky = data_stream.SKY
-                if isinstance(sky, str):
-                    try: sky = json.loads(sky)
-                    except Exception: sky = {}
-
-                pdop = sky.get('pdop')
-                hdop = sky.get('hdop')
-                vdop = sky.get('vdop')
-
-                sats = sky.get('satellites') or []
-                norm_sats = []
-                if isinstance(sats, list):
-                    for s in sats:
-                        if isinstance(s, str):
-                            try: s = json.loads(s)
-                            except Exception: s = None
-                        if isinstance(s, dict): norm_sats.append(s)
-
-                sv_tot  = len(norm_sats)
-                sv_used = sum(1 for s in norm_sats if s.get('used') in (True, 1, 'true', 'True'))
-
-                cn_vals = []
-                for s in norm_sats:
-                    v = s.get('ss') or s.get('cn0') or s.get('cn') or s.get('snr')
-                    if v is None: continue
-                    try: cn_vals.append(float(v))
-                    except Exception: pass
-
-                cn0_mean = round(sum(cn_vals)/len(cn_vals), 1) if cn_vals else None
-
-                last_sky.update(dict(
-                    pdop=pdop, hdop=hdop, vdop=vdop,
-                    sv_used=sv_used, sv_tot=sv_tot, cn0_mean=cn0_mean
-                ))
-                got_sky = True
-
-        # 5) TEC per la posizione corrente
-        ts = now_iso()
-        tec_val, tec_src = get_tec_for(lat, lon, ts)
-        print(f"[TEC] value={tec_val} source={tec_src}")
-
-        # 6) SURVEY (se supportato)
-        surv = survey_sample(WLAN)
-        if surv:
-            w.writerow([
-                ts, kp, kp_when,
-                gps_fix, lat, lon, alt,
-                last_sky["pdop"], last_sky["hdop"], last_sky["vdop"],
-                last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
-                "SURVEY", surv["freq"], surv["noise_dbm"], surv["busy_ratio"],
-                None, None, None, None, band_of(surv["freq"]),
-                tec_val, tec_src
-            ])
-            f.flush()
-
-        # 7) SCAN a banda larga
-        for row in scan_stats(WLAN):
-            w.writerow([
-                ts, kp, kp_when,
-                gps_fix, lat, lon, alt,
-                last_sky["pdop"], last_sky["hdop"], last_sky["vdop"],
-                last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
-                "SCAN", row["freq"], None, None,
-                row["n"], row["p50"], row["p10"], row["p90"], band_of(row["freq"]),
-                tec_val, tec_src
-            ])
-        f.flush()
-
-        time.sleep(60)
-
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()

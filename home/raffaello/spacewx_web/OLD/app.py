@@ -116,12 +116,15 @@ def api_gps_track():
     pts = [{"ts": str(t), "lat": float(a), "lon": float(b)} for t,a,b in zip(dd["ts"], dd["lat"], dd["lon"])]
     return jsonify({"ok": True, "points": pts})
 
+
 @app.get("/api/series")
 def api_series():
-    # Serie temporali per metriche RF e Kp
+    # Serie temporali per metriche RF e Kp, con opzionale aggregazione temporale
     metric  = request.args.get("metric", "noise_dbm").strip().lower()
     band    = _normalize_band(request.args.get("band"))
     minutes = int(request.args.get("minutes", "4320"))
+    agg     = (request.args.get("agg") or "").strip().lower()   # "median" | "mean" | ""
+    window  = (request.args.get("window") or "").strip().lower() # es. "5min", "10min"
 
     df = load_df()
     if df.empty:
@@ -144,31 +147,57 @@ def api_series():
     if metric != "kp" and band is not None:
         df = df[df["band"].astype(str) == band]
 
-    if metric in ("noise_dbm", "busy_ratio") and df[col].isna().all() and "scan_p50" in df.columns:
+    # fallback: se noise/busy sono NaN, usa scan_p50
+    if metric in ("noise_dbm", "busy_ratio") and (col not in df or df[col].isna().all()) and "scan_p50" in df.columns:
         df = df.copy()
-        df[col] = df["scan_p50"]
+        col = "scan_p50"
 
-    out = []
-    for _, r in df.iterrows():
-        v = safe_float(r.get(col))
-        if v is None or pd.isna(v) or pd.isna(r["ts"]):
-            continue
-        out.append([r["ts"].isoformat(), v])
+    dd = df[["ts", col]].dropna()
+    if dd.empty:
+        return jsonify({"ok": True, "points": []})
+
+    # Aggregazione temporale opzionale (resample con median/mean)
+    if agg in ("median","mean") and window:
+        dd = dd.set_index("ts")
+        if agg == "median":
+            s = dd[col].resample(window).median().dropna()
+        else:
+            s = dd[col].resample(window).mean().dropna()
+        out = [[t.isoformat(), float(v)] for t, v in s.items()]
+    else:
+        out = [[t.isoformat(), float(v)] for t, v in zip(dd["ts"], dd[col])]
+
     return jsonify({"ok": True, "points": out})
+
 
 @app.get("/api/series_gps")
 def api_series_gps():
-    # Serie per metriche GPS/IONO: tec | pdop | hdop | vdop | cn0_mean | sv_used | alt
+    # Serie per metriche GPS/IONO con aggregazione opzionale
+    # metric: tec | pdop | hdop | vdop | cn0_mean | sv_used | alt
     metric  = request.args.get("metric", "tec").strip().lower()
     minutes = int(request.args.get("minutes", "4320"))
+    agg     = (request.args.get("agg") or "").strip().lower()   # "median" | "mean" | ""
+    window  = (request.args.get("window") or "").strip().lower() # es. "5min"
 
     df = load_df()
     if df.empty or metric not in df.columns:
         return jsonify({"ok": True, "points": []})
 
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
-    dd = df[(df["ts"]>=cutoff) & df[metric].notna()]
-    out = [[t.isoformat(), float(v)] for t,v in zip(dd["ts"], dd[metric])]
+    dd = df[(df["ts"]>=cutoff) & df[metric].notna()][["ts", metric]].copy()
+    if dd.empty:
+        return jsonify({"ok": True, "points": []})
+
+    if agg in ("median","mean") and window:
+        dd = dd.set_index("ts")
+        if agg == "median":
+            s = dd[metric].resample(window).median().dropna()
+        else:
+            s = dd[metric].resample(window).mean().dropna()
+        out = [[t.isoformat(), float(v)] for t, v in s.items()]
+    else:
+        out = [[t.isoformat(), float(v)] for t, v in zip(dd["ts"], dd[metric])]
+
     return jsonify({"ok": True, "points": out})
 
 @app.get("/api/glossary")
