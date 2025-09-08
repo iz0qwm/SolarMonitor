@@ -3,6 +3,8 @@ import os, json, sqlite3
 from datetime import datetime, timezone, timedelta, date  
 from flask import Flask, jsonify, render_template, request
 import pandas as pd
+import math
+import traceback
 
 # --- ENV / Path ---
 try:
@@ -12,12 +14,49 @@ except Exception:
     pass
 
 TITLE     = os.environ.get("TITLE", "Space Weather QoS")
-LOGDIR    = os.environ.get("LOGDIR", os.path.expanduser("~/spacewx_logs"))
-DB_PATH   = os.environ.get("DB_PATH", os.path.join(LOGDIR, "spacewx.db"))
+LOGDIR    = os.environ.get("LOGDIR", "/home/raffaello/spacewx_logs")
+DB_PATH   = os.environ.get("DB_PATH", "/home/raffaello/spacewx_logs/spacewx.db")
 BASE_NAME = os.environ.get("CSV_BASENAME", "wifi_gps_kp_qos")  # coerente con logger
 TODAY_UTC = lambda: datetime.now(timezone.utc).date()
 
+print(f"[APP] LOGDIR={LOGDIR}")
+print(f"[APP] DB_PATH={DB_PATH} exists={os.path.exists(DB_PATH)}")
+
 app = Flask(__name__)
+
+def _read_db_range(start_iso, end_iso):
+    if not os.path.exists(DB_PATH):
+        print(f"[DB] not found: {DB_PATH}")
+        return pd.DataFrame()
+    try:
+        con = sqlite3.connect(DB_PATH)
+        q = """
+        SELECT ts_iso, kp, kp_when, gps_fix, lat, lon, alt,
+               pdop, hdop, vdop, sv_used, sv_tot, cn0_mean,
+               mode, freq, noise_dbm, busy_ratio, scan_n, scan_p50, scan_p10, scan_p90, band,
+               tec, tec_source
+        FROM raw
+        WHERE ts_iso >= ? AND ts_iso < ?
+        ORDER BY ts_iso ASC
+        """
+        df_db = pd.read_sql_query(q, con, params=[start_iso, end_iso])
+        con.close()
+        print(f"[DB] rows={len(df_db)} from {start_iso} to {end_iso}")
+        return df_db
+    except Exception as e:
+        print(f"[DB] ERROR reading {DB_PATH}: {e}")
+        traceback.print_exc()
+        try:
+            con.close()
+        except: pass
+        return pd.DataFrame()
+
+
+def none_if_nan(x):
+    try:
+        return None if (x is None or not math.isfinite(float(x))) else float(x)
+    except (TypeError, ValueError):
+        return None
 
 def parse_day_param(day_str: str | None):
     if not day_str:
@@ -42,8 +81,12 @@ def _normalize_band(s):
     return None
 
 def safe_float(x):
-    try: return float(x)
-    except: return None
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else None
+    except:
+        return None
+
 
 def _parse_ts(df):
     if "ts_iso" in df.columns:
@@ -56,7 +99,7 @@ def _parse_ts(df):
 def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
     """
     Se specific_day è valorizzato, carica solo [specific_day 00:00Z, specific_day+1 00:00Z).
-    Altrimenti usa la finestra scorrevole 'minutes' (default 3 giorni) come prima.
+    Altrimenti usa la finestra scorrevole 'minutes' (default 3 giorni).
     """
     now = datetime.now(timezone.utc)
 
@@ -65,89 +108,67 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
         end   = start + timedelta(days=1)
         frames = []
 
-        # DB storico (se presente) per quel giorno
-        if os.path.exists(DB_PATH):
-            try:
-                con = sqlite3.connect(DB_PATH)
-                q = """
-                SELECT ts_iso, kp, kp_when, gps_fix, lat, lon, alt,
-                       pdop, hdop, vdop, sv_used, sv_tot, cn0_mean,
-                       mode, freq, noise_dbm, busy_ratio, scan_n, scan_p50, scan_p10, scan_p90, band,
-                       tec, tec_source
-                FROM raw
-                WHERE ts_iso >= ? AND ts_iso < ?
-                ORDER BY ts_iso ASC
-                """
-                df_db = pd.read_sql_query(q, con, params=[start.isoformat(), end.isoformat()])
-                con.close()
-                if not df_db.empty:
-                    frames.append(df_db)
-            except Exception:
-                pass
+        # --- DB storico per quel giorno
+        df_db = _read_db_range(start.isoformat(), end.isoformat())
+        if not df_db.empty:
+            frames.append(df_db)
 
-        # CSV per quel giorno (tipicamente solo oggi; ieri di solito è già nel DB)
+        # --- CSV del giorno (tipicamente solo oggi; ieri di solito è già nel DB)
         csv_path = daily_csv_path_for_date(specific_day)
         if os.path.exists(csv_path):
             try:
                 frames.append(pd.read_csv(csv_path))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[CSV] ERROR reading {csv_path}: {e}")
 
         if not frames:
+            print(f"[LOAD] no frames for day {specific_day}")
             return pd.DataFrame()
 
         df = pd.concat(frames, ignore_index=True)
         df = _parse_ts(df)
         mask = (df["ts"] >= pd.Timestamp(start)) & (df["ts"] < pd.Timestamp(end))
         df = df[mask]
+        if "band" in df.columns:
+            df["band"] = df["band"].astype(str)
+        if len(df) > max_rows:
+            df = df.tail(max_rows)
         return df.reset_index(drop=True)
 
-    # -------- modalità finestra come prima --------
+    # -------- modalità finestra scorrevole --------
     if minutes is None:
         minutes = 3*24*60
     cutoff = now - timedelta(minutes=minutes)
     start_today = datetime.combine(TODAY_UTC(), datetime.min.time(), tzinfo=timezone.utc)
     frames = []
 
-    # DB storico fino a inizio oggi
+    # --- DB storico da cutoff fino a inizio oggi (se la finestra sconfina nel passato)
     if os.path.exists(DB_PATH) and cutoff < start_today:
-        try:
-            con = sqlite3.connect(DB_PATH)
-            q = """
-            SELECT ts_iso, kp, kp_when, gps_fix, lat, lon, alt,
-                   pdop, hdop, vdop, sv_used, sv_tot, cn0_mean,
-                   mode, freq, noise_dbm, busy_ratio, scan_n, scan_p50, scan_p10, scan_p90, band,
-                   tec, tec_source
-            FROM raw
-            WHERE ts_iso >= ? AND ts_iso < ?
-            ORDER BY ts_iso ASC
-            """
-            df_db = pd.read_sql_query(q, con, params=[cutoff.isoformat(), start_today.isoformat()])
-            con.close()
-            if not df_db.empty:
-                frames.append(df_db)
-        except Exception:
-            pass
+        df_db = _read_db_range(cutoff.isoformat(), start_today.isoformat())
+        if not df_db.empty:
+            frames.append(df_db)
 
-    # CSV odierno
+    # --- CSV odierno
     csv_today = daily_csv_path_for_date(now.date())
     if os.path.exists(csv_today):
         try:
             frames.append(pd.read_csv(csv_today))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CSV] ERROR reading {csv_today}: {e}")
 
     if not frames:
+        print("[LOAD] no frames in sliding window")
         return pd.DataFrame()
 
     df = pd.concat(frames, ignore_index=True)
-    if "ts_iso" in df.columns:
-        ts = pd.to_datetime(df["ts_iso"], utc=True, errors="coerce")
-        mask = (ts >= pd.Timestamp(cutoff)) & (ts <= pd.Timestamp(now))
+    df = _parse_ts(df)
+
+    # Finestra [cutoff, now]
+    if "ts" in df.columns:
+        mask = (df["ts"] >= pd.Timestamp(cutoff)) & (df["ts"] <= pd.Timestamp(now))
         df = df[mask]
     if "band" in df.columns:
         df["band"] = df["band"].astype(str)
-    df = _parse_ts(df)
     if len(df) > max_rows:
         df = df.tail(max_rows)
     return df.reset_index(drop=True)
@@ -166,12 +187,14 @@ def api_summary():
     df = load_df(minutes=minutes, specific_day=day)
 
     if df.empty:
-        return jsonify({"ok": True, "summary": {
-            "kplast": None,
-            "kpmax_alltime": None,
-            "rows_total": 0,
-            "rows_24h": 0
-        }, "evidence": []})
+        return jsonify({"ok": True, "points": []})
+
+    # Se "day" è impostato, abbiamo già una finestra [day 00:00Z, day+1 00:00Z)
+    # → NON applichiamo un secondo cutoff relativo a "now".
+    if day is None:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
+        df = df[df["ts"] >= cutoff]
+
 
     kps = df["kp"].dropna() if "kp" in df.columns else pd.Series([], dtype=float)
     kplast = float(kps.iloc[-1]) if not kps.empty else None
@@ -190,27 +213,36 @@ def api_summary():
 
 @app.get("/api/latest")
 def api_latest():
-    df = load_df(minutes=24*60) # 24h bastano per l'ultimo
+    df = load_df(minutes=24*60)  # 24h bastano per l'ultimo
     if df.empty:
         return jsonify({"ok": True, "latest": None})
+
     r = df.iloc[-1].to_dict()
+    fix = (r.get("gps_fix") or "NO").strip().upper()
+
+    # lat/lon/alt solo se fix 3D; altrimenti None
+    lat = safe_float(r.get("lat")) if fix == "3D" else None
+    lon = safe_float(r.get("lon")) if fix == "3D" else None
+    alt = safe_float(r.get("alt")) if fix == "3D" else None
+
     latest = {
         "ts_iso": r.get("ts_iso"),
-        "kp": safe_float(r.get("kp")),
-        "tec": safe_float(r.get("tec")),
+        "kp":        safe_float(r.get("kp")),
+        "tec":       safe_float(r.get("tec")),
         "tec_source": r.get("tec_source"),
-        "gps_fix": r.get("gps_fix"),
-        "lat": safe_float(r.get("lat")),
-        "lon": safe_float(r.get("lon")),
-        "alt": safe_float(r.get("alt")),
-        "pdop": safe_float(r.get("pdop")),
-        "hdop": safe_float(r.get("hdop")),
-        "vdop": safe_float(r.get("vdop")),
-        "sv_used": safe_float(r.get("sv_used")),
-        "sv_tot": safe_float(r.get("sv_tot")),
-        "cn0_mean": safe_float(r.get("cn0_mean"))
+        "gps_fix":    fix,
+        "lat":        lat,
+        "lon":        lon,
+        "alt":        alt,
+        "pdop":      safe_float(r.get("pdop")),
+        "hdop":      safe_float(r.get("hdop")),
+        "vdop":      safe_float(r.get("vdop")),
+        "sv_used":   safe_float(r.get("sv_used")),
+        "sv_tot":    safe_float(r.get("sv_tot")),
+        "cn0_mean":  safe_float(r.get("cn0_mean")),
     }
     return jsonify({"ok": True, "latest": latest})
+
 
 @app.get("/api/gps_track")
 def api_gps_track():
@@ -221,10 +253,15 @@ def api_gps_track():
     if df.empty or "lat" not in df.columns or "lon" not in df.columns:
         return jsonify({"ok": True, "points": []})
 
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
-    dd = df[(df["ts"]>=cutoff) & df["lat"].notna() & df["lon"].notna()].copy()
+    if day is not None:
+        dd = df[df["lat"].notna() & df["lon"].notna()].copy()
+    else:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
+        dd = df[(df["ts"]>=cutoff) & df["lat"].notna() & df["lon"].notna()].copy()
+
     pts = [{"ts": str(t), "lat": float(a), "lon": float(b)} for t,a,b in zip(dd["ts"], dd["lat"], dd["lon"])]
     return jsonify({"ok": True, "points": pts})
+
 
 @app.get("/api/series")
 def api_series():
@@ -283,15 +320,20 @@ def api_series_gps():
     agg     = (request.args.get("agg") or "").strip().lower()
     window  = (request.args.get("window") or "").strip().lower()
 
-    df = load_df(minutes=minutes, specific_day=day)     # NEW
+    df = load_df(minutes=minutes, specific_day=day)
 
     if df.empty or metric not in df.columns:
         return jsonify({"ok": True, "points": []})
 
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
-    dd = df[(df["ts"]>=cutoff) & df[metric].notna()][["ts", metric]].copy()
+    if day is not None:
+        dd = df[df[metric].notna()][["ts", metric]].copy()
+    else:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
+        dd = df[(df["ts"]>=cutoff) & df[metric].notna()][["ts", metric]].copy()
+
     if dd.empty:
         return jsonify({"ok": True, "points": []})
+
 
     if agg in ("median","mean") and window:
         dd = dd.set_index("ts")

@@ -1,0 +1,50 @@
+[Unit]
+Description=WiFi + GPSD(remote) + Kp Logger
+# Assicurati che il device di rete esista prima di partire (anche USB hotplug)
+Requires=sys-subsystem-net-devices-wlan1.device
+After=sys-subsystem-net-devices-wlan1.device
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+
+# Config a parte (opzionale)
+# EnvironmentFile=/etc/default/wifi-gps-kp
+
+Environment=GPSD_HOST=127.0.0.1
+Environment=GPSD_PORT=2947
+Environment=WLAN_IF=wlan1
+
+# Attendi che l'interfaccia esista e diventi "UP" (max ~30s)
+# Nota: per usare $WLAN_IF serve la shell
+ExecStartPre=/bin/sh -c '/usr/sbin/rfkill unblock all'
+ExecStartPre=/bin/sh -c '/sbin/ip link show wlan1 >/dev/null 2>&1 || exit 1'
+ExecStartPre=/bin/sh -c '/sbin/ip link set wlan1 down || true'
+ExecStartPre=/bin/sh -c '/sbin/iw dev wlan1 set type managed || true'
+ExecStartPre=/bin/sh -c '/sbin/ip link set wlan1 up || true'
+# loop di attesa: operstate deve diventare "up" o "dormant"
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do st=$(cat /sys/class/net/wlan1/operstate 2>/dev/null || echo "unknown"); case "$st" in up|dormant) exit 0;; esac; sleep 1; done; echo "wlan non pronta"; exit 1'
+
+# Avvio del logger
+ExecStart=/home/raffaello/spacewx-venv/bin/python /home/raffaello/spacewx_logs/wifi_gps_kp_logger.py
+WorkingDirectory=/home/raffaello
+User=raffaello
+
+# Cap di rete (se servono davvero al tuo script; altrimenti puoi toglierli)
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+
+# Restart con backoff, evitare start-limit
+Restart=always
+RestartSec=5
+#StartLimitIntervalSec=0
+
+# Log puliti
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

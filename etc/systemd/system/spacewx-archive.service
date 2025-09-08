@@ -1,0 +1,8 @@
+[Unit]
+Description=SpaceWX nightly archive to SQLite
+
+[Service]
+Type=oneshot
+User=raffaello
+ExecStart=/home/raffaello/spacewx-venv/bin/python /home/raffaello/spacewx_logs/spacewx_archive.py
+

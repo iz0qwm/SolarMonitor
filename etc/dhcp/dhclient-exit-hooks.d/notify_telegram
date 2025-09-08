@@ -1,0 +1,45 @@
+#!/bin/sh
+# Inviamo un Telegram quando l'interfaccia ottiene/cambia IP
+
+# Usiamo solo wlan0 (cambia se ti serve su altre interfacce)
+[ "$interface" = "wlan0" ] || exit 0
+
+# Consideriamo solo eventi utili
+case "$reason" in
+  BOUND|RENEW|REBIND|REBOOT)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+# Carica config con BOT_TOKEN/CHAT_ID/PORT
+CONF="/etc/telegram-ip.conf"
+[ -r "$CONF" ] || exit 0
+. "$CONF"
+
+# IP nuovo fornito da dhclient
+IP="$new_ip_address"
+[ -n "$IP" ] || exit 0
+
+# Antispam: invia solo se l'IP è cambiato
+STATE_DIR="/run/notify_telegram"
+STATE_FILE="$STATE_DIR/last_ip_${interface}"
+mkdir -p "$STATE_DIR"
+if [ -f "$STATE_FILE" ] && [ "$(cat "$STATE_FILE")" = "$IP" ]; then
+  exit 0
+fi
+echo "$IP" > "$STATE_FILE"
+
+# Messaggio
+HOST="$(hostname)"
+MSG="🌐 ${HOST} su ${interface}: http://${IP}:${PORT}"
+
+# Invia con curl
+CURL="/usr/bin/curl"
+[ -x "$CURL" ] || exit 0
+"$CURL" -s --max-time 5 -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${CHAT_ID}" \
+  --data-urlencode "text=${MSG}" >/dev/null 2>&1
+
+exit 0

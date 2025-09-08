@@ -1,0 +1,17 @@
+# /etc/systemd/system/spacewx-web.service
+[Unit]
+Description=SpaceWx Dashboard (Flask)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/raffaello/spacewx_web
+Environment=CSV_PATH=/home/raffaello/spacewx_logs/wifi_gps_kp_qos.csv
+Environment=HOST=0.0.0.0
+Environment=PORT=8088
+ExecStart=/home/raffaello/spacewx-venv/bin/python /home/raffaello/spacewx_web/app.py
+Restart=always
+User=raffaello
+
+[Install]
+WantedBy=multi-user.target
+

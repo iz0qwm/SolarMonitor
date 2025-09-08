@@ -43,7 +43,19 @@ if (nextDayBtn){ nextDayBtn.addEventListener('click', () => shiftDay(+1)); }
 
 
 
-async function fetchJSON(url){ const r=await fetch(url); return await r.json(); }
+async function fetchJSON(url){
+  const r = await fetch(url);
+  const txt = await r.text();
+  try {
+    return JSON.parse(txt);
+  } catch (e) {
+    const fixed = txt
+      .replace(/\bNaN\b/g, 'null')
+      .replace(/\b-?Infinity\b/g, 'null');
+    return JSON.parse(fixed);
+  }
+}
+
 
 function q(params){
   // helper per serializzare query
@@ -205,9 +217,11 @@ async function refreshAll(){
 
   const lat = latest?.latest?.lat, lon = latest?.latest?.lon;
   const fix = latest?.latest?.gps_fix ?? "—";
-  document.getElementById('pos-badge').textContent = (lat && lon)
-      ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
-      : `Pos: — (${fix})`;
+  const hasPos = Number.isFinite(lat) && Number.isFinite(lon);
+  document.getElementById('pos-badge').textContent = hasPos
+    ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
+    : `Pos: — (${fix})`;
+
 
   // Help panel (riempi una sola volta)
   const helpBody = document.getElementById('help-body');
