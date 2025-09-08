@@ -111,6 +111,10 @@ Sono collegati i seguenti dispositivi:
 
 Questa configurazione hardware permette di raccogliere in tempo reale sia i parametri GPS sia le condizioni RF locali, correlati con i dati di space weather (Kp, TEC).
 
+[Antenna GPS USB VK-162 G-Mouse](https://amzn.to/4m5RxIu)
+[ALFA Network AWUS036ACHM 802.111AC](https://amzn.to/46qq6Vg)
+[Raspberry Pi3 Modello B+](https://amzn.to/42jml1t)
+[Atolla Hub USB 3.0 alimentato](https://amzn.to/3VaAMky)
 
 ### 🔌 Schema hardware & flusso dati
 
