@@ -148,3 +148,6 @@ Questa configurazione hardware permette di raccogliere in tempo reale sia i para
 Esempio di visualizzazione dell'interfaccia web:
 
 ![Interfaccia](https://www.kwos.org/appoggio/droni/space_weather_qos/space_weather_QOS.png)
+![Help_1](https://www.kwos.org/appoggio/droni/space_weather_qos/space_weather_QOS_02.png)
+![Help_2](https://www.kwos.org/appoggio/droni/space_weather_qos/space_weather_QOS_03.png)
+![Help_3](https://www.kwos.org/appoggio/droni/space_weather_qos/space_weather_QOS_04.png)
