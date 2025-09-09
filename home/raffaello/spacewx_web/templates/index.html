@@ -99,7 +99,27 @@
     .help-footer{ margin-top:10px; }
     .help-footer a{ text-decoration:none; }
 
+    /* Overlay di caricamento */
+    #loading {
+      position: fixed; inset: 0; background: rgba(255,255,255,.9);
+      display: none; z-index: 5000; align-items: center; justify-content: center;
+    }
+    .loading-box{
+      width: min(720px, 92vw);
+      background: #fff; border:1px solid #ddd; border-radius: 12px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.15); padding: 14px;
+    }
+    .loading-head{ display:flex; align-items:center; gap:.6rem; margin-bottom:.5rem;}
+    .loading-dot{ width:10px; height:10px; border-radius:50%; background:#6aa0ff; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%{opacity:.3} 50%{opacity:1} 100%{opacity:.3} }
+    #loading-log{
+      font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background:#f7f8fa; border:1px solid #e6eaf2; padding:8px; border-radius:8px;
+      max-height: 45vh; overflow:auto; white-space: pre-wrap;
+    }
 
+    @keyframes pulse { 0%{opacity:.3} 50%{opacity:1} 100%{opacity:.3} }
+    
   </style>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 </head>
@@ -219,5 +239,22 @@
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/dashboard.js"></script>
+
+<div id="loading" role="dialog" aria-live="polite" aria-label="Caricamento dati"
+     style="position:fixed;inset:0;display:none;z-index:5000;align-items:center;justify-content:center;background:rgba(255,255,255,.9)">
+  <div class="loading-box" style="width:min(720px,92vw);background:#fff;border:1px solid #ddd;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.15);padding:14px;">
+    <div class="loading-head" style="display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;">
+      <div class="loading-dot" style="width:10px;height:10px;border-radius:50%;background:#6aa0ff;animation:pulse 1s infinite"></div>
+      <strong id="loading-title">Caricamento…</strong>
+      <span id="loading-sub" style="margin-left:.25rem;color:#666;font-size:12px"></span>
+    </div>
+    <div id="loading-log"
+         style="font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;background:#f7f8fa;border:1px solid #e6eaf2;padding:8px;border-radius:8px;max-height:45vh;overflow:auto;white-space:pre-wrap;">
+      Avvio…
+    </div>
+  </div>
+</div>
+
+
 </body>
 </html>

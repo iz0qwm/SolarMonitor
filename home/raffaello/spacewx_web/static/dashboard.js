@@ -1,10 +1,102 @@
 // dashboard.js
 
+// ---- Overlay caricamento (autoiniettato se manca) ----
+let loadingEl, loadingLog, loadingTitle, loadingSub;
+let _loadingTimer = null;
+let _loadingShown = false;
+
+function ensureOverlay() {
+  if (loadingEl && loadingLog && loadingTitle && loadingSub) return;
+
+  // prova a prenderli se esistono già
+  loadingEl    = document.getElementById('loading');
+  loadingLog   = document.getElementById('loading-log');
+  loadingTitle = document.getElementById('loading-title');
+  loadingSub   = document.getElementById('loading-sub');
+
+  // altrimenti crea tutto
+  if (!loadingEl) {
+    loadingEl = document.createElement('div');
+    loadingEl.id = 'loading';
+    loadingEl.setAttribute('role', 'dialog');
+    loadingEl.setAttribute('aria-live', 'polite');
+    loadingEl.style.cssText = 'position:fixed;inset:0;display:none;z-index:5000;align-items:center;justify-content:center;background:rgba(255,255,255,.9)';
+
+    const box = document.createElement('div');
+    box.className = 'loading-box';
+    box.style.cssText = 'width:min(720px,92vw);background:#fff;border:1px solid #ddd;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.15);padding:14px;';
+
+    const head = document.createElement('div');
+    head.className = 'loading-head';
+    head.style.cssText = 'display:flex;align-items:center;gap:.6rem;margin-bottom:.5rem;';
+
+    const dot = document.createElement('div');
+    dot.className = 'loading-dot';
+    dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:#6aa0ff;animation:pulse 1s infinite';
+
+    const keyframes = document.createElement('style');
+    keyframes.textContent = '@keyframes pulse{0%{opacity:.3}50%{opacity:1}100%{opacity:.3}}';
+    document.head.appendChild(keyframes);
+
+    loadingTitle = document.createElement('strong');
+    loadingTitle.id = 'loading-title';
+    loadingSub = document.createElement('span');
+    loadingSub.id = 'loading-sub';
+    loadingSub.style.cssText = 'margin-left:.25rem;color:#666;font-size:12px';
+
+    head.appendChild(dot);
+    head.appendChild(loadingTitle);
+    head.appendChild(loadingSub);
+
+    loadingLog = document.createElement('div');
+    loadingLog.id = 'loading-log';
+    loadingLog.style.cssText = 'font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;background:#f7f8fa;border:1px solid #e6eaf2;padding:8px;border-radius:8px;max-height:45vh;overflow:auto;white-space:pre-wrap;';
+
+    box.appendChild(head);
+    box.appendChild(loadingLog);
+    loadingEl.appendChild(box);
+    document.body.appendChild(loadingEl);
+  }
+}
+
+function showLoading(title, sub){
+  ensureOverlay();
+  if (_loadingShown) return;
+  loadingTitle.textContent = title || 'Caricamento…';
+  loadingSub.textContent   = sub || '';
+  loadingLog.textContent   = 'Avvio…';
+  _loadingTimer = setTimeout(()=>{
+    loadingEl.style.display = 'flex';
+    _loadingShown = true;
+  }, 400);
+}
+function logLoading(line){
+  if (!_loadingShown && _loadingTimer === null) return; // niente log se non visibile o mai aperto
+  ensureOverlay();
+  loadingLog.textContent += '\n' + line;
+  loadingLog.scrollTop = loadingLog.scrollHeight;
+}
+function hideLoading(){
+  if (_loadingTimer){ clearTimeout(_loadingTimer); _loadingTimer = null; }
+  if (_loadingShown){
+    loadingEl.style.display = 'none';
+    _loadingShown = false;
+  }
+}
+
+// ---- fine overlay ----
+
+
+
+
 let currentDay = null; // string "YYYY-MM-DD" oppure null per "finestra scorrevole"
 const dayPicker = document.getElementById('dayPicker');
 const prevDayBtn = document.getElementById('prevDayBtn');
 const nextDayBtn = document.getElementById('nextDayBtn');
 const dayLabel   = document.getElementById('dayLabel');
+
+
+// Colorazione badges
 
 function colorForKp(kp){
   if (!Number.isFinite(kp)) return {bg:'#eef6ff', fg:'#111', label:'—'};
@@ -35,14 +127,18 @@ function colorForTEC(tec){
   return            {bg:'#FF6B6B', fg:'#fff',          label:`${tec.toFixed(0)} TECu (Severe)`};
 }
 
-function setDay(dStr){ // dStr può essere null (modalità "live")
+function setDay(dStr){
   currentDay = dStr;
   if (dayPicker) dayPicker.value = dStr || "";
   if (dayLabel){
     dayLabel.textContent = dStr ? `Giorno selezionato: ${dStr}` : "In tempo reale (ultima finestra)";
   }
+  // Overlay informativo
+  showLoading(dStr ? `Caricamento storico ${dStr}` : 'Caricamento dati live',
+              dStr ? 'Lettura da database…' : 'Lettura da CSV + DB…');
   refreshAll();
 }
+
 
 function shiftDay(delta){ // delta = ±1 giorni
   let d = currentDay ? new Date(currentDay) : new Date();
@@ -209,113 +305,122 @@ function ensureMap(){
 }
 
 async function refreshAll(){
-  const minutesParam = currentDay ? 1440 : 4320; // 1 giorno se selezionato, 3 giorni se live
-  const shortM       = currentDay ? 1440 : 180;  // per la traccia GPS
-  const agg          = currentDay ? "median" : "";
-  const win          = currentDay ? "5min"  : "";
+  try{
+    const minutesParam = currentDay ? 1440 : 4320;
+    const shortM       = currentDay ? 1440 : 180;
+    const agg          = currentDay ? "median" : "";
+    const win          = currentDay ? "5min"  : "";
 
-  const [
-    summary, latest, glossary,
-    tecSeries, hdopSeries, pdopSeries, vdopSeries, cn0Series, svuSeries,
-    noise24Series, noise58Series, scan24Series, scan58Series, kpSeries,
-    track
-  ] = await Promise.all([
-    loadSummary(),
-    fetchJSON('/api/latest'),
-    fetchJSON('/api/glossary'),
+    const tasks = [
+      ['summary',     loadSummary()],
+      ['latest',      fetchJSON('/api/latest')],
+      ['glossary',    fetchJSON('/api/glossary')],
+      ['tec',         loadSeriesGps("tec",      { agg, window: win, minutes: minutesParam })],
+      ['hdop',        loadSeriesGps("hdop",     { agg, window: win, minutes: minutesParam })],
+      ['pdop',        loadSeriesGps("pdop",     { agg, window: win, minutes: minutesParam })],
+      ['vdop',        loadSeriesGps("vdop",     { agg, window: win, minutes: minutesParam })],
+      ['cn0',         loadSeriesGps("cn0_mean", { agg, window: win, minutes: minutesParam })],
+      ['sv_used',     loadSeriesGps("sv_used",  { agg, window: win, minutes: minutesParam })],
+      ['noise24',     loadSeries("noise_dbm", { band:"24", agg, window: win, minutes: minutesParam })],
+      ['noise58',     loadSeries("noise_dbm", { band:"58", agg, window: win, minutes: minutesParam })],
+      ['scan24',      loadSeries("scan_p50",  { band:"24", agg, window: win, minutes: minutesParam })],
+      ['scan58',      loadSeries("scan_p50",  { band:"58", agg, window: win, minutes: minutesParam })],
+      ['kp',          loadSeries("kp",        { minutes: minutesParam })],
+      ['track',       loadGpsTrack(shortM)]
+    ];
 
-    loadSeriesGps("tec",      { agg, window: win, minutes: minutesParam }),
-    loadSeriesGps("hdop",     { agg, window: win, minutes: minutesParam }),
-    loadSeriesGps("pdop",     { agg, window: win, minutes: minutesParam }),
-    loadSeriesGps("vdop",     { agg, window: win, minutes: minutesParam }),
-    loadSeriesGps("cn0_mean", { agg, window: win, minutes: minutesParam }),
-    loadSeriesGps("sv_used",  { agg, window: win, minutes: minutesParam }),
+    logLoading('Richieste inviate…');
 
-    loadSeries("noise_dbm", { band:"24", agg, window: win, minutes: minutesParam }),
-    loadSeries("noise_dbm", { band:"58", agg, window: win, minutes: minutesParam }),
-    loadSeries("scan_p50",  { band:"24", agg, window: win, minutes: minutesParam }),
-    loadSeries("scan_p50",  { band:"58", agg, window: win, minutes: minutesParam }),
-    loadSeries("kp",        { minutes: minutesParam }),
+    // Esegui e logga ogni step
+    const results = await Promise.all(tasks.map(async ([name, p])=>{
+      try{
+        const r = await p;
+        logLoading(`✓ ${name}`);
+        return [name, r];
+      } catch(e){
+        logLoading(`✗ ${name} — ${e?.message || e}`);
+        return [name, null];
+      }
+    }));
 
-    loadGpsTrack(shortM)
-  ]);
+    // Index rapido dei risultati
+    const R = Object.fromEntries(results);
 
-  // Badge
-  // Badge Kp
-  const kpVal = summary?.summary?.kplast;
-  const kpB = document.getElementById('kp-badge');
-  if (kpB){
-    const c = colorForKp(Number(kpVal));
-    kpB.textContent = `Kp: ${c.label}`;
-    kpB.style.background = c.bg;
-    kpB.style.color = c.fg;
-  }
+    // Badge Kp
+    const kpVal = R.summary?.summary?.kplast;
+    const kpB = document.getElementById('kp-badge');
+    if (kpB){
+      const c = colorForKp(Number(kpVal));
+      kpB.textContent = `Kp: ${c.label}`;
+      kpB.style.background = c.bg; kpB.style.color = c.fg;
+    }
 
-  // Badge TEC
-  const tecVal = Number(latest?.latest?.tec);
-  const tecSrc = latest?.latest?.tec_source || "—";
-  const tecB = document.getElementById('tec-badge');
-  if (tecB){
-    const c = colorForTEC(tecVal);
-    tecB.textContent = Number.isFinite(tecVal) ? `TEC: ${c.label} (${tecSrc})` : `TEC: — (${tecSrc})`;
-    tecB.style.background = c.bg;
-    tecB.style.color = c.fg;
-  }
+    // Badge TEC
+    const tecVal = Number(R.latest?.latest?.tec);
+    const tecSrc = R.latest?.latest?.tec_source || "—";
+    const tecB = document.getElementById('tec-badge');
+    if (tecB){
+      const c = colorForTEC(tecVal);
+      tecB.textContent = Number.isFinite(tecVal) ? `TEC: ${c.label} (${tecSrc})` : `TEC: — (${tecSrc})`;
+      tecB.style.background = c.bg; tecB.style.color = c.fg;
+    }
 
-  // Badge Posizione
-  const lat = latest?.latest?.lat, lon = latest?.latest?.lon;
-  const fix = latest?.latest?.gps_fix ?? "—";
-  const hasPos = Number.isFinite(lat) && Number.isFinite(lon);
-  const posB = document.getElementById('pos-badge');
-  if (posB){
-    posB.textContent = hasPos
-      ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
-      : `Pos: — (${fix})`;
-  }
+    // Badge Posizione
+    const lat = R.latest?.latest?.lat, lon = R.latest?.latest?.lon;
+    const fix = R.latest?.latest?.gps_fix ?? "—";
+    const posB = document.getElementById('pos-badge');
+    if (posB){
+      posB.textContent = (Number.isFinite(lat) && Number.isFinite(lon))
+        ? `Pos: ${lat.toFixed(5)}, ${lon.toFixed(5)} (${fix})`
+        : `Pos: — (${fix})`;
+    }
 
+    // Glossario (una sola volta)
+    const glossary = R.glossary;
+    const helpGloss = document.getElementById('help-glossary') || document.getElementById('help-body');
+    if (helpGloss && !helpGloss.dataset.filled && glossary?.items) {
+      helpGloss.innerHTML = glossary.items.map(item =>
+        `<div style="margin:6px 0;">
+          <b>${item.label}</b> <code style="color:#667">${item.field}</code><br/>
+          <span style="color:#333">${item.desc}</span>
+        </div>`
+      ).join('');
+      helpGloss.dataset.filled = "1";
+    }
 
+    // Grafici GPS
+    upsertLine('tec',   'TEC',          R.tec?.points  || []);
+    upsertLine('hdop',  'HDOP',         R.hdop?.points || []);
+    upsertLine('pdop',  'PDOP',         R.pdop?.points || []);
+    upsertLine('vdop',  'VDOP',         R.vdop?.points || []);
+    upsertLine('cn0',   'C/N0',         R.cn0?.points  || []);
+    upsertLine('svused','SV used',      R.sv_used?.points || []);
 
-  // Help panel (riempi una sola volta il GLOSSARIO, senza toccare i badge)
-  const helpGloss = document.getElementById('help-glossary') || document.getElementById('help-body');
-  if (helpGloss && !helpGloss.dataset.filled && glossary?.items) {
-    helpGloss.innerHTML = glossary.items.map(item =>
-      `<div style="margin:6px 0;">
-        <b>${item.label}</b> <code style="color:#667">${item.field}</code><br/>
-        <span style="color:#333">${item.desc}</span>
-      </div>`
-    ).join('');
-    helpGloss.dataset.filled = "1";
-  }
+    // Grafici RF
+    upsertLine('noise24', 'noise dBm',     R.noise24?.points || []);
+    upsertLine('noise58', 'noise dBm',     R.noise58?.points || []);
+    upsertLine('scan24',  'scan p50 RSSI', R.scan24?.points  || []);
+    upsertLine('scan58',  'scan p50 RSSI', R.scan58?.points  || []);
+    upsertLine('kp',      'Kp',            R.kp?.points       || []);
 
+    // Mappa + trail
+    ensureMap();
+    const coords = (R.track?.points || []).map(p => [p.lat, p.lon]).filter(a => a[0] && a[1]);
+    if (coords.length){
+      marker.setLatLng(coords.at(-1));
+      trail.setLatLngs(coords);
+      map.fitBounds(trail.getBounds(), { padding: [20,20] });
+    } else if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      marker.setLatLng([lat,lon]);
+      trail.setLatLngs([[lat,lon]]);
+      map.setView([lat,lon], 16);
+    }
 
-  // Grafici GPS
-  upsertLine('tec',   'TEC',          tecSeries?.points  || []);
-  upsertLine('hdop',  'HDOP',         hdopSeries?.points || []);
-  upsertLine('pdop',  'PDOP',         pdopSeries?.points || []);
-  upsertLine('vdop',  'VDOP',         vdopSeries?.points || []);
-  upsertLine('cn0',   'C/N0',         cn0Series?.points  || []);
-  upsertLine('svused','SV used',      svuSeries?.points  || []);
-
-  // Grafici RF
-  upsertLine('noise24', 'noise dBm',     noise24Series?.points || []);
-  upsertLine('noise58', 'noise dBm',     noise58Series?.points || []);
-  upsertLine('scan24',  'scan p50 RSSI', scan24Series?.points  || []);
-  upsertLine('scan58',  'scan p50 RSSI', scan58Series?.points  || []);
-  upsertLine('kp',      'Kp',            kpSeries?.points       || []);
-
-  // Mappa + trail
-  ensureMap();
-  const coords = (track?.points || []).map(p => [p.lat, p.lon]).filter(a => a[0] && a[1]);
-  if (coords.length){
-    marker.setLatLng(coords.at(-1));
-    trail.setLatLngs(coords);
-    map.fitBounds(trail.getBounds(), { padding: [20,20] });
-  } else if (lat && lon) {
-    marker.setLatLng([lat,lon]);
-    trail.setLatLngs([[lat,lon]]);
-    map.setView([lat,lon], 16);
+  } finally {
+    hideLoading();
   }
 }
+
 
 
 // Help panel toggle (unico listener)

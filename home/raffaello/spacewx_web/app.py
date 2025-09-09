@@ -41,8 +41,10 @@ def _read_db_range(start_iso, end_iso):
         """
         df_db = pd.read_sql_query(q, con, params=[start_iso, end_iso])
         con.close()
+        df_db = _coerce_numeric(df_db)   # Trasforma in numero gli n/a
         print(f"[DB] rows={len(df_db)} from {start_iso} to {end_iso}")
         return df_db
+
     except Exception as e:
         print(f"[DB] ERROR reading {DB_PATH}: {e}")
         traceback.print_exc()
@@ -95,6 +97,27 @@ def _parse_ts(df):
         df["ts"] = pd.NaT
     return df
 
+# Colonne che dovrebbero essere numeriche
+NUMERIC_COLS = [
+    "kp", "pdop", "hdop", "vdop", "sv_used", "sv_tot", "cn0_mean",
+    "noise_dbm", "busy_ratio", "scan_n", "scan_p50", "scan_p10", "scan_p90",
+    "lat", "lon", "alt", "tec", "freq"
+]
+
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    # Trasforma stringhe 'n/a', 'NA', '' in NaN in modo robusto
+    df = df.replace({"n/a": None, "N/A": None, "NA": None, "": None})
+    # Forza colonne numeriche dove presenti
+    for c in NUMERIC_COLS:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Normalizza band a stringa (usata per filtri testuali)
+    if "band" in df.columns:
+        df["band"] = df["band"].astype(str)
+    return df
+
 # --- Loader composito: DB (storico) + CSV (oggi) ---
 def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
     """
@@ -117,7 +140,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
         csv_path = daily_csv_path_for_date(specific_day)
         if os.path.exists(csv_path):
             try:
-                frames.append(pd.read_csv(csv_path))
+                frames.append(pd.read_csv(csv_path, na_values=["n/a", "N/A", "NA", ""]))
             except Exception as e:
                 print(f"[CSV] ERROR reading {csv_path}: {e}")
 
@@ -152,7 +175,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
     csv_today = daily_csv_path_for_date(now.date())
     if os.path.exists(csv_today):
         try:
-            frames.append(pd.read_csv(csv_today))
+            frames.append(pd.read_csv(csv_today, na_values=["n/a", "N/A", "NA", ""]))
         except Exception as e:
             print(f"[CSV] ERROR reading {csv_today}: {e}")
 
@@ -162,6 +185,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
 
     df = pd.concat(frames, ignore_index=True)
     df = _parse_ts(df)
+    df = _coerce_numeric(df) 
 
     # Finestra [cutoff, now]
     if "ts" in df.columns:
@@ -265,20 +289,22 @@ def api_gps_track():
 
 @app.get("/api/series")
 def api_series():
-    day     = parse_day_param(request.args.get("day"))  # NEW
+    day     = parse_day_param(request.args.get("day"))
     metric  = (request.args.get("metric") or "noise_dbm").strip().lower()
     band    = _normalize_band(request.args.get("band"))
     minutes = int(request.args.get("minutes", "4320"))
     agg     = (request.args.get("agg") or "").strip().lower()
     window  = (request.args.get("window") or "").strip().lower()
 
-    df = load_df(minutes=minutes, specific_day=day)     # NEW
+    df = load_df(minutes=minutes, specific_day=day)
 
     if df.empty:
         return jsonify({"ok": True, "points": []})
 
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
-    df = df[df["ts"] >= cutoff]
+    # ⬇️ DIFFERENZA: se 'day' è specificato NON applichiamo un cutoff relativo a 'now'
+    if day is None:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=minutes)
+        df = df[df["ts"] >= cutoff]
 
     colmap = {
         "noise_dbm": "noise_dbm",
@@ -296,8 +322,7 @@ def api_series():
 
     # fallback noise/busy → scan_p50 se tutto NaN
     if metric in ("noise_dbm", "busy_ratio") and (col not in df or df[col].isna().all()) and "scan_p50" in df.columns:
-        df = df.copy()
-        col = "scan_p50"
+        df = df.copy(); col = "scan_p50"
 
     dd = df[["ts", col]].dropna()
     if dd.empty:
@@ -311,6 +336,7 @@ def api_series():
         out = [[t.isoformat(), float(v)] for t, v in zip(dd["ts"], dd[col])]
 
     return jsonify({"ok": True, "points": out})
+
 
 @app.get("/api/series_gps")
 def api_series_gps():
@@ -334,7 +360,8 @@ def api_series_gps():
     if dd.empty:
         return jsonify({"ok": True, "points": []})
 
-
+    dd[metric] = pd.to_numeric(dd[metric], errors="coerce")
+    
     if agg in ("median","mean") and window:
         dd = dd.set_index("ts")
         s = (dd[metric].resample(window).median() if agg=="median" else dd[metric].resample(window).mean()).dropna()
