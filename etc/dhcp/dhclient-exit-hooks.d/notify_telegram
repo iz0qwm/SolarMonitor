@@ -1,8 +1,8 @@
 #!/bin/sh
 # Inviamo un Telegram quando l'interfaccia ottiene/cambia IP
 
-# Usiamo solo wlan0 (cambia se ti serve su altre interfacce)
-[ "$interface" = "wlan0" ] || exit 0
+# Usiamo solo wlan-internal (cambia se ti serve su altre interfacce)
+[ "$interface" = "wlan-internal" ] || exit 0
 
 # Consideriamo solo eventi utili
 case "$reason" in

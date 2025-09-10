@@ -21,13 +21,20 @@ KP_CACHE = os.path.join(LOGDIR, ".kp_cache.json")
 
 GPSD_HOST = os.environ.get("GPSD_HOST","127.0.0.1")
 GPSD_PORT = int(os.environ.get("GPSD_PORT","2947"))
-WLAN = os.environ.get("WLAN_IF","wlan1")
+WLAN = os.environ.get("WLAN_IF","wlan-scan")
 KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 
 # --- ROTATION & HOUSEKEEPING (aggiungi sopra a main) ---
 RAW_KEEP_DAYS = int(os.environ.get("RAW_KEEP_DAYS", "7"))   # giorni di raw da tenere
 LOGDIR = os.path.expanduser("~/spacewx_logs")               # già definito nel tuo file
 BASE = "wifi_gps_kp_qos"
+
+# --- aggiungi vicino agli import/util ---
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
 
 def daily_csv_path(dt_utc=None):
     dt_utc = dt_utc or datetime.now(timezone.utc)
@@ -244,24 +251,34 @@ def bilinear_tec(grid_obj, lat, lon):
 
 
 def get_tec_for(lat, lon, ts_iso):
-    if lat is None or lon is None or not ts_iso:
+    # normalizza input
+    lat_f = _safe_float(lat)
+    lon_f = _safe_float(lon)
+    if lat_f is None or lon_f is None:
+        # niente posizione → niente TEC
         return (None, None)
+    if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        return (None, None)
+
+    # normalizza timestamp
     try:
         dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         dt = datetime.now(timezone.utc)
 
-    print(f"[TEC] request lat={float(lat):.6f} lon={float(lon):.6f} at {fmt_slot(dt)}Z")
+    print(f"[TEC] request lat={lat_f:.6f} lon={lon_f:.6f} at {fmt_slot(dt)}Z")
+
     obj, dt_str = fetch_ingv_grid_multi(dt)
     if not obj:
         print(f"[TEC] no grid available for {fmt_slot(floor_to_10min(dt))}Z (tried {_INGV_TRIES} slots back)")
         return (None, None)
 
-    tec = bilinear_tec(obj, round(float(lat), 6), round(float(lon), 6))
+    tec = bilinear_tec(obj, round(lat_f, 6), round(lon_f, 6))
     if tec is None:
         return (None, None)
 
     return (tec, f"ingv-wsnc_med@{dt_str}")
+
 
 
 # FIX: Kp caching + resilienza
@@ -342,6 +359,7 @@ def scan_stats(wlan):
             i=int((p/100)*(len(arr)-1)); return arr[i]
         rows.append(dict(freq=f, n=len(arr), p50=pct(50), p10=pct(10), p90=pct(90)))
     return rows
+
 
 def band_of(freq):
     if not freq: return "?"
@@ -483,7 +501,11 @@ def main():
 
         # 5) TEC per la posizione corrente
         ts = now_iso()
-        tec_val, tec_src = get_tec_for(lat, lon, ts)
+        if gps_fix == "NO":
+            tec_val, tec_src = (None, None)
+        else:
+            tec_val, tec_src = get_tec_for(lat, lon, ts)
+
         print(f"[TEC] value={tec_val} source={tec_src}")
 
         # 6) SURVEY (se supportato)

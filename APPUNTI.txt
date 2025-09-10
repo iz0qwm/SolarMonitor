@@ -1,0 +1,48 @@
+Per evitare che le due WLAN (quella interna e quella esterna) della Raspberry si scambino il
+ruolo, sono stati creati in /etc/systemd/network
+
+# wlan interna (MAC b8:27:eb:41:ff:0b) → wlan-internal
+sudo tee /etc/systemd/network/10-wlan-internal.link >/dev/null <<'EOF'
+[Match]
+MACAddress=b8:27:eb:41:ff:0b
+
+[Link]
+Name=wlan-internal
+EOF
+
+# chiavetta USB (MAC 7c:c2:c6:34:f3:d5) → wlan-scan
+sudo tee /etc/systemd/network/11-wlan-scan.link >/dev/null <<'EOF'
+[Match]
+MACAddress=7c:c2:c6:34:f3:d5
+
+[Link]
+Name=wlan-scan
+EOF
+
+
+E per compatibilità con vecchi sistemi:
+
+sudo tee /etc/udev/rules.d/70-persistent-net.rules >/dev/null <<'EOF'
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="b8:27:eb:41:ff:0b", NAME="wlan-internal"
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="7c:c2:c6:34:f3:d5", NAME="wlan-scan"
+EOF
+
+
+
+sudo udevadm control --reload
+
+----------------------------------------
+
+Per evitare problemi con i trattini di wlan-scan e wlan-internal ho utilizzat gli 
+escaped per i servizi:
+
+sudo systemctl enable --now 'wpa_supplicant@wlan\x2dinternal.service'
+sudo systemctl status 'wpa_supplicant@wlan\x2dinternal.service'
+
+sudo systemctl start 'dhclient@wlan\x2dinternal.service'
+sudo systemctl enable 'dhclient@wlan\x2dinternal.service'
+
+
+
+
+ 

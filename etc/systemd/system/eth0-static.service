@@ -1,0 +1,19 @@
+[Unit]
+Description=Configura IP statico su eth0 (solo accesso locale)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip link set eth0 up
+ExecStart=/sbin/ip addr replace 192.168.1.4/24 dev eth0
+ExecStart=/sbin/ip rule add from 192.168.1.4 table eth
+ExecStart=/sbin/ip route add 192.168.1.0/24 dev eth0 scope link table eth
+ExecStart=/sbin/ip route del 192.168.1.0/24 dev eth0
+
+
+ExecStop=/sbin/ip addr flush dev eth0
+
+[Install]
+WantedBy=multi-user.target

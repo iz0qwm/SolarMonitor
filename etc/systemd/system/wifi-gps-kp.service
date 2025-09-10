@@ -1,8 +1,8 @@
 [Unit]
 Description=WiFi + GPSD(remote) + Kp Logger
 # Assicurati che il device di rete esista prima di partire (anche USB hotplug)
-Requires=sys-subsystem-net-devices-wlan1.device
-After=sys-subsystem-net-devices-wlan1.device
+Requires=sys-subsystem-net-devices-wlan-scan.device
+After=sys-subsystem-net-devices-wlan-scan.device
 Wants=network-online.target
 After=network-online.target
 
@@ -14,17 +14,18 @@ Type=simple
 
 Environment=GPSD_HOST=127.0.0.1
 Environment=GPSD_PORT=2947
-Environment=WLAN_IF=wlan1
+Environment=WLAN_IF=wlan-scan
 
 # Attendi che l'interfaccia esista e diventi "UP" (max ~30s)
 # Nota: per usare $WLAN_IF serve la shell
+# Sync orario da internet (anche se differisce molto)
+ExecStartPre=/bin/sh -c '/usr/sbin/ntpdate -u pool.ntp.org || true'
 ExecStartPre=/bin/sh -c '/usr/sbin/rfkill unblock all'
-ExecStartPre=/bin/sh -c '/sbin/ip link show wlan1 >/dev/null 2>&1 || exit 1'
-ExecStartPre=/bin/sh -c '/sbin/ip link set wlan1 down || true'
-ExecStartPre=/bin/sh -c '/sbin/iw dev wlan1 set type managed || true'
-ExecStartPre=/bin/sh -c '/sbin/ip link set wlan1 up || true'
-# loop di attesa: operstate deve diventare "up" o "dormant"
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do st=$(cat /sys/class/net/wlan1/operstate 2>/dev/null || echo "unknown"); case "$st" in up|dormant) exit 0;; esac; sleep 1; done; echo "wlan non pronta"; exit 1'
+ExecStartPre=/bin/sh -c '/sbin/ip link show wlan-scan >/dev/null 2>&1 || exit 1'
+ExecStartPre=/bin/sh -c '/sbin/ip link set wlan-scan down || true'
+ExecStartPre=/bin/sh -c '/sbin/iw reg set IT'
+ExecStartPre=/bin/sh -c '/sbin/iw dev wlan-scan set type managed || true'
+ExecStartPre=/bin/sh -c '/sbin/ip link set wlan-scan up || true'
 
 # Avvio del logger
 ExecStart=/home/raffaello/spacewx-venv/bin/python /home/raffaello/spacewx_logs/wifi_gps_kp_logger.py
