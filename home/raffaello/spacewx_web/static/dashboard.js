@@ -325,6 +325,8 @@ async function refreshAll(){
       ['noise58',     loadSeries("noise_dbm", { band:"58", agg, window: win, minutes: minutesParam })],
       ['scan24',      loadSeries("scan_p50",  { band:"24", agg, window: win, minutes: minutesParam })],
       ['scan58',      loadSeries("scan_p50",  { band:"58", agg, window: win, minutes: minutesParam })],
+      ['busy24',      loadSeries("busy_ratio", { band:"24", agg, window: win, minutes: minutesParam })],
+      ['busy58',      loadSeries("busy_ratio", { band:"58", agg, window: win, minutes: minutesParam })],
       ['kp',          loadSeries("kp",        { minutes: minutesParam })],
       ['track',       loadGpsTrack(shortM)]
     ];
@@ -345,6 +347,79 @@ async function refreshAll(){
 
     // Index rapido dei risultati
     const R = Object.fromEntries(results);
+
+    // ---- Evidenze Quiet vs Storm → tabella ----
+    const evTbody = document.querySelector('#ev-table tbody');
+    if (evTbody) {
+      const ev = R.summary?.evidence || [];
+      evTbody.innerHTML = '';
+
+      const fmt = (v, metr) => {
+        if (v === null || v === undefined || Number.isNaN(v)) return '—';
+        // Formattazioni leggere per metrica
+        if (metr === 'busy_ratio') return (v*100).toFixed(1) + '%';
+        if (metr.startsWith('scan_') || metr === 'noise_dbm') return v.toFixed(1) + ' dBm';
+        if (metr === 'cn0_mean') return v.toFixed(1) + ' dB-Hz';
+        if (metr.endsWith('dop')) return v.toFixed(2);
+        if (metr === 'sv_used') return v.toFixed(0);
+        if (metr === 'tec') return v.toFixed(0) + ' TECu';
+        return typeof v === 'number' ? v.toFixed(2) : String(v);
+      };
+
+      const labelBand = (b) => b ? (b === '24' ? '2.4 GHz' : (b === '58' ? '5.8 GHz' : b)) : 'GPS';
+      const labelMetr = (m) => ({
+        noise_dbm:'Rumore',
+        busy_ratio:'Occupazione',
+        scan_p50:'RSSI p50',
+        scan_p90:'RSSI p90',
+        scan_p10:'RSSI p10',
+        hdop:'HDOP', vdop:'VDOP', pdop:'PDOP',
+        cn0_mean:'C/N₀',
+        sv_used:'SV usati',
+        tec:'TEC'
+      }[m] || m);
+
+      ev.forEach(row => {
+        const tr = document.createElement('tr');
+        const band = labelBand(row.band);
+        const metr = labelMetr(row.metric);
+
+        const delta = row.delta;
+        const deltaTxt = fmt(delta, row.metric);
+        const deltaCell = document.createElement('td');
+        deltaCell.textContent = deltaTxt;
+
+        // Colora Δ: peggio se >0 per noise/busy/DOP, meglio se >0 per C/N0/SV_used
+        const worseIfHigher = ['noise_dbm','busy_ratio','scan_p50','scan_p90','scan_p10','hdop','vdop','pdop','tec'];
+        const betterIfHigher = ['cn0_mean','sv_used'];
+        let severity = '';
+        if (typeof delta === 'number') {
+          const mag = Math.abs(delta);
+          if (worseIfHigher.includes(row.metric)) {
+            severity = delta > 0 ? (mag > 3 ? 'bad' : 'warn') : '';
+          } else if (betterIfHigher.includes(row.metric)) {
+            severity = delta < 0 ? (mag > 3 ? 'bad' : 'warn') : '';
+          }
+        }
+        if (severity === 'bad')   deltaCell.style.color = '#B00020';
+        if (severity === 'warn')  deltaCell.style.color = '#C77700';
+
+        tr.innerHTML = `
+          <td>${band}</td>
+          <td>${metr}</td>
+          <td>${fmt(row.quiet_med, row.metric)}</td>
+          <td>${fmt(row.storm_med, row.metric)}</td>
+        `;
+        tr.appendChild(deltaCell);
+        evTbody.appendChild(tr);
+      });
+
+      if (ev.length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="5"><em>Nessuna evidenza (dati insufficienti in uno dei due regimi).</em></td>`;
+        evTbody.appendChild(tr);
+      }
+    }
 
     // Badge Kp
     const kpVal = R.summary?.summary?.kplast;
@@ -401,6 +476,8 @@ async function refreshAll(){
     upsertLine('noise58', 'noise dBm',     R.noise58?.points || []);
     upsertLine('scan24',  'scan p50 RSSI', R.scan24?.points  || []);
     upsertLine('scan58',  'scan p50 RSSI', R.scan58?.points  || []);
+    upsertLine('busy24', 'busy ratio', R.busy24?.points || []);
+    upsertLine('busy58', 'busy ratio', R.busy58?.points || []);
     upsertLine('kp',      'Kp',            R.kp?.points       || []);
 
     // Mappa + trail

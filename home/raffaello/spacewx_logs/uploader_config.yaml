@@ -1,0 +1,19 @@
+project_id: solarmonitor-896f7
+sensor_id: SCANDRIGLIA-01
+source:        # come leggere i dati da questo host
+  mode: "api"  # "api" | "csvdb"
+  api_base: "http://127.0.0.1:8088"   # il tuo app.py espone /api/latest, /api/summary, ecc.
+  minutes: 60
+firestore:
+  credentials_json: "/home/raffaello/keys/solarmonitor-896f7-firebase-adminsdk-fbsvc-577d0b87cd.json"
+  private_collection:
+    sensors: "sensors"
+    status: "sensor_status"
+    raw: "measurements"         # measurements/{sensorId}/raw/{ts}
+    rollup_hourly: "rollup"     # rollup/{sensorId}/hourly/{slot}
+upload:
+  period_sec: 30                # ogni 30s invia uno status + eventuale misura nuova
+  buffer_dir: "/home/raffaello/spacewx_logs/.upload_queue"  # coda offline
+privacy:
+  public: false                 # potrai abilitarlo dopo via console
+  coarse_digits: 1              # arrotonda lat/lon se un domani vorrai esporre al pubblico

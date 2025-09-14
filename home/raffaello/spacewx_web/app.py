@@ -6,6 +6,9 @@ import pandas as pd
 import math
 import traceback
 
+APP_BUILD = "latestmix-2025-09-13-00:xx"
+print(f"[APP] build={APP_BUILD}")
+
 # --- ENV / Path ---
 try:
     from dotenv import load_dotenv
@@ -23,6 +26,88 @@ print(f"[APP] LOGDIR={LOGDIR}")
 print(f"[APP] DB_PATH={DB_PATH} exists={os.path.exists(DB_PATH)}")
 
 app = Flask(__name__)
+
+# --- Config evidenze Quiet vs Storm ---
+STORM_KP_THRESHOLD  = 5.0    # G1+
+STORM_TEC_THRESHOLD = 125.0  # Moderate+
+MIN_SAMPLES_PER_REGIME = 10  # richiede almeno N punti Quiet e N punti Storm
+
+RF_METRICS  = ["noise_dbm", "busy_ratio", "scan_p50", "scan_p90", "scan_p10"]
+GPS_METRICS = ["hdop", "vdop", "pdop", "cn0_mean", "sv_used", "tec"]  # estendibile
+
+
+
+def _storm_mask(df: pd.DataFrame) -> pd.Series:
+    kp  = pd.to_numeric(df.get("kp"), errors="coerce")
+    tec = pd.to_numeric(df.get("tec"), errors="coerce")
+    kp_storm  = kp.ge(STORM_KP_THRESHOLD)   if kp is not None  else pd.Series(False, index=df.index)
+    tec_storm = tec.ge(STORM_TEC_THRESHOLD) if tec is not None else pd.Series(False, index=df.index)
+    m = (kp_storm.fillna(False)) | (tec_storm.fillna(False))
+    # Se non c’è nessuna info, tutto False → niente evidenze
+    return m
+
+def _median_or_none(series: pd.Series) -> float | None:
+    try:
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        return float(s.median()) if len(s) else None
+    except Exception:
+        return None
+
+def compute_evidence(df: pd.DataFrame) -> list[dict]:
+    if df is None or df.empty:
+        return []
+
+    # mask storm/quiet
+    storm = _storm_mask(df)
+    quiet = ~storm
+
+    out = []
+
+    # ---- RF per banda (24/58) ----
+    if "band" in df.columns:
+        for band in ["24", "58"]:
+            dband = df[df["band"].astype(str) == band]
+            if dband.empty:
+                continue
+            qmask = quiet.loc[dband.index]
+            smask = storm.loc[dband.index]
+            for metr in RF_METRICS:
+                if metr not in dband.columns:
+                    continue
+                qvals = pd.to_numeric(dband.loc[qmask, metr], errors="coerce").dropna()
+                svals = pd.to_numeric(dband.loc[smask, metr], errors="coerce").dropna()
+                if len(qvals) < MIN_SAMPLES_PER_REGIME or len(svals) < MIN_SAMPLES_PER_REGIME:
+                    continue
+                qmed = float(qvals.median())
+                smed = float(svals.median())
+                out.append({
+                    "band": band, "metric": metr,
+                    "quiet_med": qmed, "storm_med": smed,
+                    "delta": smed - qmed,
+                    "n_quiet": int(len(qvals)), "n_storm": int(len(svals))
+                })
+
+    # ---- GPS (senza banda) ----
+    for metr in GPS_METRICS:
+        if metr not in df.columns:
+            continue
+        qvals = pd.to_numeric(df.loc[quiet, metr], errors="coerce").dropna()
+        svals = pd.to_numeric(df.loc[storm, metr], errors="coerce").dropna()
+        if len(qvals) < MIN_SAMPLES_PER_REGIME or len(svals) < MIN_SAMPLES_PER_REGIME:
+            continue
+        qmed = float(qvals.median())
+        smed = float(svals.median())
+        out.append({
+            "band": None, "metric": metr,
+            "quiet_med": qmed, "storm_med": smed,
+            "delta": smed - qmed,
+            "n_quiet": int(len(qvals)), "n_storm": int(len(svals))
+        })
+
+    # Facoltativo: ordina per |delta| decrescente per mettere in alto le differenze più “evidenti”
+    out.sort(key=lambda r: abs(r.get("delta") or 0.0), reverse=True)
+    return out
+
 
 def _read_db_range(start_iso, end_iso):
     if not os.path.exists(DB_PATH):
@@ -74,6 +159,41 @@ def daily_csv_path_for_date(d: date):
     daydir = os.path.join(LOGDIR, "daily", y, m)
     return os.path.join(daydir, f"{BASE_NAME}_{y}{m}{dd}.csv")
 
+CSV_COLUMNS = [
+    "ts_iso","kp","kp_when","gps_fix","lat","lon","alt",
+    "pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
+    "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90",
+    "band","tec","tec_source"
+]
+
+def _read_csv_robust(path: str) -> pd.DataFrame:
+    # 1° tentativo: usare l’header del file
+    try:
+        return pd.read_csv(
+            path,
+            header=0,
+            na_values=["n/a","N/A","NA",""],
+            engine="python",
+            on_bad_lines="skip"
+        )
+    except Exception as e:
+        print(f"[CSV] header=0 failed: {e}")
+    # 2° tentativo: forziamo i nomi e skippiamo righe ‘sporche’
+    try:
+        return pd.read_csv(
+            path,
+            names=CSV_COLUMNS,
+            header=None,
+            usecols=range(len(CSV_COLUMNS)),
+            na_values=["n/a","N/A","NA",""],
+            engine="python",
+            on_bad_lines="skip"
+        )
+    except Exception as e:
+        print(f"[CSV] ERROR reading {path} (robust): {e}")
+        return pd.DataFrame()
+
+
 # --- Normalizzazioni / util ---
 def _normalize_band(s):
     if s is None: return None
@@ -92,10 +212,17 @@ def safe_float(x):
 
 def _parse_ts(df):
     if "ts_iso" in df.columns:
-        df["ts"] = pd.to_datetime(df["ts_iso"], utc=True, errors="coerce")
+        # Esempio: 2025-09-11T14:42:07.316243+00:00
+        df["ts"] = pd.to_datetime(
+            df["ts_iso"],
+            format="%Y-%m-%dT%H:%M:%S.%f%z",
+            utc=True,
+            errors="coerce"
+        )
     else:
         df["ts"] = pd.NaT
     return df
+
 
 # Colonne che dovrebbero essere numeriche
 NUMERIC_COLS = [
@@ -140,7 +267,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
         csv_path = daily_csv_path_for_date(specific_day)
         if os.path.exists(csv_path):
             try:
-                frames.append(pd.read_csv(csv_path, na_values=["n/a", "N/A", "NA", ""]))
+                frames.append(_read_csv_robust(csv_path))
             except Exception as e:
                 print(f"[CSV] ERROR reading {csv_path}: {e}")
 
@@ -150,6 +277,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
 
         df = pd.concat(frames, ignore_index=True)
         df = _parse_ts(df)
+        df = _coerce_numeric(df) 
         mask = (df["ts"] >= pd.Timestamp(start)) & (df["ts"] < pd.Timestamp(end))
         df = df[mask]
         if "band" in df.columns:
@@ -175,7 +303,7 @@ def load_df(minutes=None, max_rows=250_000, specific_day: date | None = None):
     csv_today = daily_csv_path_for_date(now.date())
     if os.path.exists(csv_today):
         try:
-            frames.append(pd.read_csv(csv_today, na_values=["n/a", "N/A", "NA", ""]))
+            frames.append(_read_csv_robust(csv_today))
         except Exception as e:
             print(f"[CSV] ERROR reading {csv_today}: {e}")
 
@@ -233,7 +361,15 @@ def api_summary():
         "rows_total": int(len(df)),
         "rows_24h": rows_24h
     }
-    return jsonify({"ok": True, "summary": summary, "evidence": []})
+
+    try:
+        evidence = compute_evidence(df)
+    except Exception as e:
+        print("[EVIDENCE] error:", e)
+        evidence = []
+
+    return jsonify({"ok": True, "summary": summary, "evidence": evidence})
+
 
 @app.get("/api/latest")
 def api_latest():
@@ -241,31 +377,92 @@ def api_latest():
     if df.empty:
         return jsonify({"ok": True, "latest": None})
 
-    r = df.iloc[-1].to_dict()
-    fix = (r.get("gps_fix") or "NO").strip().upper()
+    # Ordine di preferenza: SURVEY -> SCAN (serve per il "core" GPS/KP/TEC)
+    mode_priority = {"SURVEY": 2, "SCAN": 1}
+    df = df.copy()
+    df["mode_u"] = df.get("mode", "").astype(str).str.upper()
+    df["mode_pri"] = df["mode_u"].map(mode_priority).fillna(0)
 
-    # lat/lon/alt solo se fix 3D; altrimenti None
-    lat = safe_float(r.get("lat")) if fix == "3D" else None
-    lon = safe_float(r.get("lon")) if fix == "3D" else None
-    alt = safe_float(r.get("alt")) if fix == "3D" else None
+    # 1) “record di riferimento” per i campi GPS/KP/TEC (indipendente dalla banda)
+    core = df.sort_values(["ts", "mode_pri"]).iloc[-1].to_dict()
+
+    def pick_band(b: str):
+        """
+        Ritorna un oggetto che fonde l'ultimo SURVEY (busy) e l'ultimo SCAN (rumore) per la banda b ('24'|'58').
+        Espone anche freq/ts di provenienza per debug. Se c'è sia busy che noise -> mode='MIX'.
+        """
+        dd = df[df.get("band", "").astype(str) == str(b)]
+        if dd.empty:
+            return None
+
+        survey = dd[dd["mode_u"] == "SURVEY"].sort_values("ts").tail(1)
+        scan   = dd[dd["mode_u"] == "SCAN"  ].sort_values("ts").tail(1)
+
+        out = {}
+
+        # --- Busy da SURVEY ---
+        if not survey.empty:
+            s = survey.iloc[-1].to_dict()
+            out.update({
+                "busy_ratio": safe_float(s.get("busy_ratio")),
+                "freq_busy":  s.get("freq"),
+                "ts_busy":    s.get("ts_iso"),
+            })
+
+        # --- Rumore da SCAN (preferisci noise_dbm, fallback p50) ---
+        if not scan.empty:
+            sc = scan.iloc[-1].to_dict()
+            noise = safe_float(sc.get("noise_dbm"))
+            if noise is None:
+                noise = safe_float(sc.get("scan_p50"))
+            out.update({
+                "noise_dbm":  noise,
+                "scan_n":     safe_float(sc.get("scan_n")),
+                "scan_p10":   safe_float(sc.get("scan_p10")),
+                "scan_p50":   safe_float(sc.get("scan_p50")),
+                "scan_p90":   safe_float(sc.get("scan_p90")),
+                "freq_noise": sc.get("freq"),
+                "ts_noise":   sc.get("ts_iso"),
+            })
+
+        # Etichetta sintetica del “modo” risultante
+        if "busy_ratio" in out and "noise_dbm" in out:
+            out["mode"] = "MIX"
+        elif "busy_ratio" in out:
+            out["mode"] = "SURVEY"
+        elif "noise_dbm" in out:
+            out["mode"] = "SCAN"
+
+        return out or None
+
+    fix = (core.get("gps_fix") or "NO").strip().upper()
+    lat = safe_float(core.get("lat")) if fix == "3D" else None
+    lon = safe_float(core.get("lon")) if fix == "3D" else None
+    alt = safe_float(core.get("alt")) if fix == "3D" else None
 
     latest = {
-        "ts_iso": r.get("ts_iso"),
-        "kp":        safe_float(r.get("kp")),
-        "tec":       safe_float(r.get("tec")),
-        "tec_source": r.get("tec_source"),
+        "ts_iso":     core.get("ts_iso"),
+        "kp":         safe_float(core.get("kp")),
+        "tec":        safe_float(core.get("tec")),
+        "tec_source": core.get("tec_source"),
         "gps_fix":    fix,
         "lat":        lat,
         "lon":        lon,
         "alt":        alt,
-        "pdop":      safe_float(r.get("pdop")),
-        "hdop":      safe_float(r.get("hdop")),
-        "vdop":      safe_float(r.get("vdop")),
-        "sv_used":   safe_float(r.get("sv_used")),
-        "sv_tot":    safe_float(r.get("sv_tot")),
-        "cn0_mean":  safe_float(r.get("cn0_mean")),
+        "pdop":       safe_float(core.get("pdop")),
+        "hdop":       safe_float(core.get("hdop")),
+        "vdop":       safe_float(core.get("vdop")),
+        "sv_used":    safe_float(core.get("sv_used")),
+        "sv_tot":     safe_float(core.get("sv_tot")),
+        "cn0_mean":   safe_float(core.get("cn0_mean")),
+        # Snapshot RF per banda (fusione SURVEY+SCAN)
+        "rf": {
+            "24": pick_band("24"),
+            "58": pick_band("58"),
+        }
     }
     return jsonify({"ok": True, "latest": latest})
+
 
 
 @app.get("/api/gps_track")
@@ -327,6 +524,8 @@ def api_series():
     dd = df[["ts", col]].dropna()
     if dd.empty:
         return jsonify({"ok": True, "points": []})
+
+    dd[col] = pd.to_numeric(dd[col], errors="coerce")
 
     if agg in ("median","mean") and window:
         dd = dd.set_index("ts")

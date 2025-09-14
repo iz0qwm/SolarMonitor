@@ -312,15 +312,28 @@ def run(cmd, timeout=8):
     return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=timeout).decode(errors="ignore")
 
 def survey_sample(wlan):
+    """Ritorna fino a due dict: il canale più busy in 2.4 e in 5.x GHz."""
     try:
         out = run(["/sbin/iw","dev",wlan,"survey","dump"])
     except Exception:
-        return None
+        return []
+    rows = []  # [{freq, noise_dbm, busy_ratio}]
     freq=noise=active=busy=None
+    def _flush():
+        nonlocal freq, noise, active, busy
+        if freq is not None:
+            br = (busy/active) if (busy and active and active>0) else None
+            rows.append(dict(freq=freq, noise_dbm=noise, busy_ratio=br))
+        freq=noise=active=busy=None
     for L in out.splitlines():
         L=L.strip()
-        if L.startswith("frequency:"):
-            freq=int(L.split()[1])
+        if L.startswith("Survey data from"):  # separatore blocchi (opzionale)
+            _flush()
+        elif L.startswith("frequency:"):
+            _flush()
+            parts=L.split()
+            try: freq=int(parts[1])
+            except: freq=None
         elif "noise:" in L:
             try: noise=int(L.split()[-2])
             except: noise=None
@@ -330,10 +343,17 @@ def survey_sample(wlan):
         elif "channel busy time:" in L:
             try: busy=int(L.split()[-2])
             except: busy=None
-    if freq:
-        busy_ratio = (busy/active) if (busy and active and active>0) else None
-        return dict(freq=freq, noise_dbm=noise, busy_ratio=busy_ratio)
-    return None
+    _flush()
+    if not rows: return []
+    # pick busiest per band
+    rows_24 = [r for r in rows if 2400 <= (r["freq"] or 0) <= 2500]
+    rows_58 = [r for r in rows if 5150 <= (r["freq"] or 0) <= 5950]
+    pick = []
+    if rows_24:
+        pick.append(max(rows_24, key=lambda r: (r["busy_ratio"] or -1)))
+    if rows_58:
+        pick.append(max(rows_58, key=lambda r: (r["busy_ratio"] or -1)))
+    return pick
 
 def scan_stats(wlan):
     try:
@@ -509,8 +529,8 @@ def main():
         print(f"[TEC] value={tec_val} source={tec_src}")
 
         # 6) SURVEY (se supportato)
-        surv = survey_sample(WLAN)
-        if surv:
+        survey_rows = survey_sample(WLAN)
+        for surv in survey_rows:
             w.writerow([
                 ts, kp, kp_when,
                 gps_fix, lat, lon, alt,

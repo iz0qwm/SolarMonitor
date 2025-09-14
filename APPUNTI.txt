@@ -13,7 +13,7 @@ EOF
 # chiavetta USB (MAC 7c:c2:c6:34:f3:d5) → wlan-scan
 sudo tee /etc/systemd/network/11-wlan-scan.link >/dev/null <<'EOF'
 [Match]
-MACAddress=7c:c2:c6:34:f3:d5
+MACAddress=00:c0:ca:b7:a9:e5
 
 [Link]
 Name=wlan-scan
@@ -24,7 +24,7 @@ E per compatibilità con vecchi sistemi:
 
 sudo tee /etc/udev/rules.d/70-persistent-net.rules >/dev/null <<'EOF'
 SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="b8:27:eb:41:ff:0b", NAME="wlan-internal"
-SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="7c:c2:c6:34:f3:d5", NAME="wlan-scan"
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:c0:ca:b7:a9:e5", NAME="wlan-scan"
 EOF
 
 
