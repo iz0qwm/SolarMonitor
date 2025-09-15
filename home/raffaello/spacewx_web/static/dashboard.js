@@ -107,13 +107,14 @@ function colorForKp(kp){
   // Kp = 7 (G3) → Arancione
   // Kp = 8, 9- (G4) → Rosso chiaro
   // Kp = 9o (G5) → Rosso (interpreto 9.0 pieno)
-  if (kp < 5)           return {bg:'#C7F2C8', fg:'#0B3D0B', label:`${kp}`};       // verde
-  if (kp === 5)         return {bg:'#FFF3B0', fg:'#5C4800', label:`${kp} (G1)`};  // giallo
-  if (kp === 6)         return {bg:'#FFD8A8', fg:'#5A3A00', label:`${kp} (G2)`};  // arancio chiaro
-  if (kp === 7)         return {bg:'#FFC078', fg:'#5A2A00', label:`${kp} (G3)`};  // arancione
-  if (kp >= 8 && kp < 9)return {bg:'#FFA8A8', fg:'#5A0B0B', label:`${kp} (G4)`};  // rosso chiaro
-  if (kp >= 9)          return {bg:'#FF6B6B', fg:'#fff',    label:`${kp} (G5)`};  // rosso pieno
-  return {bg:'#eef6ff', fg:'#111', label:`${kp}`};
+  if (kp < 4)                  return {bg:'#C7F2C8', fg:'#0B3D0B', label:`${kp.toFixed(2)}`};        // verde
+  if (kp >= 4 && kp < 5)       return {bg:'#FFF3B0', fg:'#5C4800', label:`${kp.toFixed(2)} (G1)`};   // giallo
+  if (kp >= 5 && kp < 6)       return {bg:'#FFD8A8', fg:'#5A3A00', label:`${kp.toFixed(2)} (G2)`};   // arancio chiaro
+  if (kp >= 6 && kp < 7)       return {bg:'#FFC078', fg:'#5A2A00', label:`${kp.toFixed(2)} (G3)`};   // arancione
+  if (kp >= 7 && kp < 9)       return {bg:'#FFA8A8', fg:'#5A0B0B', label:`${kp.toFixed(2)} (G4)`};   // rosso chiaro
+  if (kp >= 9)                 return {bg:'#FF6B6B', fg:'#fff',    label:`${kp.toFixed(2)} (G5)`};   // rosso pieno
+
+  return {bg:'#eef6ff', fg:'#111', label:`${kp.toFixed(2)}`};
 }
 
 function colorForTEC(tec){
