@@ -7,6 +7,7 @@ from collections import deque, defaultdict  # se già non presenti
 from urllib.parse import quote  # in testa, vicino agli import
 from bisect import bisect_right
 import gzip, shutil
+from sensehat_b_reader import read_shtc3, read_lps22hb, read_icm20948_mag
 
 # Endpoint INGV (puoi sovrascriverlo via env se cambia)
 TEC_INGV_URL_TEMPLATE = os.environ.get(
@@ -398,8 +399,11 @@ def main():
             "ts_iso","kp","kp_when",
             "gps_fix","lat","lon","alt","pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
             "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90","band",
-            "tec","tec_source"
+            "tec","tec_source",
+            "t_c","rh_pct","p_hpa",
+            "mag_x_counts","mag_y_counts","mag_z_counts","mag_norm_counts"
         ])
+
         f.flush()
 
     # --- gpsd ---
@@ -437,7 +441,9 @@ def main():
                 "ts_iso","kp","kp_when",
                 "gps_fix","lat","lon","alt","pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
                 "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90","band",
-                "tec","tec_source"
+                "tec","tec_source",
+                "t_c","rh_pct","p_hpa",
+                "mag_x_counts","mag_y_counts","mag_z_counts","mag_norm_counts"
             ])
             f.flush()
 
@@ -528,6 +534,25 @@ def main():
 
         print(f"[TEC] value={tec_val} source={tec_src}")
 
+        # 5a) Lettura parametri da SenseHAT B
+        # Letture Sense HAT B (t/rh/p + magnetometro)
+        # in testa vicino agli env
+        TEMP_OFFSET_C = float(os.environ.get("TEMP_OFFSET_C", "0.0"))  # es: -3.5
+
+
+        t_sht, rh_pct = read_shtc3()           # °C / %RH (SHTC3)
+        p_hpa, t_lps  = read_lps22hb()         # hPa / °C  (LPS22HB)
+        # fusione semplice se entrambi presenti
+        if t_sht is not None and t_lps is not None:
+            t_c = 0.7*t_sht + 0.3*t_lps
+        else:
+            t_c = t_sht if t_sht is not None else t_lps
+        if t_c is not None:
+            t_c = round(t_c + TEMP_OFFSET_C, 2)
+
+
+        mx, my, mz, mnorm = read_icm20948_mag()   # counts (ICM-20948/AK09916)
+
         # 6) SURVEY (se supportato)
         survey_rows = survey_sample(WLAN)
         for surv in survey_rows:
@@ -538,7 +563,9 @@ def main():
                 last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
                 "SURVEY", surv["freq"], surv["noise_dbm"], surv["busy_ratio"],
                 None, None, None, None, band_of(surv["freq"]),
-                tec_val, tec_src
+                tec_val, tec_src,
+                t_c, rh_pct, p_hpa,
+                mx, my, mz, mnorm
             ])
             f.flush()
 
@@ -551,7 +578,9 @@ def main():
                 last_sky["sv_used"], last_sky["sv_tot"], last_sky["cn0_mean"],
                 "SCAN", row["freq"], None, None,
                 row["n"], row["p50"], row["p10"], row["p90"], band_of(row["freq"]),
-                tec_val, tec_src
+                tec_val, tec_src,
+                t_c, rh_pct, p_hpa,
+                mx, my, mz, mnorm
             ])
         f.flush()
 

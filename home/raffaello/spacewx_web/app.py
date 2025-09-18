@@ -34,7 +34,13 @@ MIN_SAMPLES_PER_REGIME = 10  # richiede almeno N punti Quiet e N punti Storm
 
 RF_METRICS  = ["noise_dbm", "busy_ratio", "scan_p50", "scan_p90", "scan_p10"]
 GPS_METRICS = ["hdop", "vdop", "pdop", "cn0_mean", "sv_used", "tec"]  # estendibile
-
+# Campi ambientali e magnetometro (opz.)
+ENV_METRICS = ["t_c", "rh_pct", "p_hpa"]
+MAG_COLUMNS = ["mag_x_counts", "mag_y_counts", "mag_z_counts", "mag_norm_counts"]
+AK09916_UT_PER_COUNT = 0.15  # ICM-20948 magnetometer (AK09916): ~0.15 µT/LSB
+# usiamo SEMPRE snake case minuscolo per le metriche
+MAG_METRIC_NAME = "mag_norm_ut"
+OTHER_METRICS = [MAG_METRIC_NAME]  # derivata dai counts
 
 
 def _storm_mask(df: pd.DataFrame) -> pd.Series:
@@ -104,6 +110,26 @@ def compute_evidence(df: pd.DataFrame) -> list[dict]:
             "n_quiet": int(len(qvals)), "n_storm": int(len(svals))
         })
 
+    
+    # ---- Ambientali e magnetometro (senza banda) ----
+    # mag_norm_ut ora arriva già in df da _coerce_numeric()
+
+    for metr in ENV_METRICS + OTHER_METRICS:
+        if metr not in df.columns:
+            continue
+        qvals = pd.to_numeric(df.loc[quiet, metr], errors="coerce").dropna()
+        svals = pd.to_numeric(df.loc[storm, metr], errors="coerce").dropna()
+        if len(qvals) < MIN_SAMPLES_PER_REGIME or len(svals) < MIN_SAMPLES_PER_REGIME:
+            continue
+        qmed = float(qvals.median())
+        smed = float(svals.median())
+        out.append({
+            "band": None, "metric": metr,
+            "quiet_med": qmed, "storm_med": smed,
+            "delta": smed - qmed,
+            "n_quiet": int(len(qvals)), "n_storm": int(len(svals))
+        })
+
     # Facoltativo: ordina per |delta| decrescente per mettere in alto le differenze più “evidenti”
     out.sort(key=lambda r: abs(r.get("delta") or 0.0), reverse=True)
     return out
@@ -117,13 +143,16 @@ def _read_db_range(start_iso, end_iso):
         con = sqlite3.connect(DB_PATH)
         q = """
         SELECT ts_iso, kp, kp_when, gps_fix, lat, lon, alt,
-               pdop, hdop, vdop, sv_used, sv_tot, cn0_mean,
-               mode, freq, noise_dbm, busy_ratio, scan_n, scan_p50, scan_p10, scan_p90, band,
-               tec, tec_source
+            pdop, hdop, vdop, sv_used, sv_tot, cn0_mean,
+            mode, freq, noise_dbm, busy_ratio, scan_n, scan_p50, scan_p10, scan_p90, band,
+            tec, tec_source,
+            t_c, rh_pct, p_hpa,
+            mag_x_counts, mag_y_counts, mag_z_counts, mag_norm_counts
         FROM raw
         WHERE ts_iso >= ? AND ts_iso < ?
         ORDER BY ts_iso ASC
         """
+
         df_db = pd.read_sql_query(q, con, params=[start_iso, end_iso])
         con.close()
         df_db = _coerce_numeric(df_db)   # Trasforma in numero gli n/a
@@ -163,8 +192,11 @@ CSV_COLUMNS = [
     "ts_iso","kp","kp_when","gps_fix","lat","lon","alt",
     "pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
     "mode","freq","noise_dbm","busy_ratio","scan_n","scan_p50","scan_p10","scan_p90",
-    "band","tec","tec_source"
+    "band","tec","tec_source",
+    "t_c","rh_pct","p_hpa",
+    "mag_x_counts","mag_y_counts","mag_z_counts","mag_norm_counts"
 ]
+
 
 def _read_csv_robust(path: str) -> pd.DataFrame:
     # 1° tentativo: usare l’header del file
@@ -228,8 +260,11 @@ def _parse_ts(df):
 NUMERIC_COLS = [
     "kp", "pdop", "hdop", "vdop", "sv_used", "sv_tot", "cn0_mean",
     "noise_dbm", "busy_ratio", "scan_n", "scan_p50", "scan_p10", "scan_p90",
-    "lat", "lon", "alt", "tec", "freq"
+    "lat", "lon", "alt", "tec", "freq",
+    "t_c", "rh_pct", "p_hpa",
+    "mag_x_counts","mag_y_counts","mag_z_counts","mag_norm_counts"
 ]
+
 
 def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -243,6 +278,12 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     # Normalizza band a stringa (usata per filtri testuali)
     if "band" in df.columns:
         df["band"] = df["band"].astype(str)
+    # Deriva SEMPRE la colonna µT una volta sola (evita ricalcoli negli endpoint)
+    if "mag_norm_counts" in df.columns and MAG_METRIC_NAME not in df.columns:
+        try:
+            df[MAG_METRIC_NAME] = pd.to_numeric(df["mag_norm_counts"], errors="coerce") * AK09916_UT_PER_COUNT
+        except Exception:
+            pass
     return df
 
 # --- Loader composito: DB (storico) + CSV (oggi) ---
@@ -440,6 +481,7 @@ def api_latest():
     lon = safe_float(core.get("lon")) if fix == "3D" else None
     alt = safe_float(core.get("alt")) if fix == "3D" else None
 
+
     latest = {
         "ts_iso":     core.get("ts_iso"),
         "kp":         safe_float(core.get("kp")),
@@ -455,12 +497,27 @@ def api_latest():
         "sv_used":    safe_float(core.get("sv_used")),
         "sv_tot":     safe_float(core.get("sv_tot")),
         "cn0_mean":   safe_float(core.get("cn0_mean")),
-        # Snapshot RF per banda (fusione SURVEY+SCAN)
+
+        # ⬇️ NUOVI: ambientali
+        "t_c":        safe_float(core.get("t_c")),
+        "rh_pct":     safe_float(core.get("rh_pct")),
+        "p_hpa":      safe_float(core.get("p_hpa")),
+
+        # opzionale: magnetometro grezzo (counts)
+        "mag_x_counts":   safe_float(core.get("mag_x_counts")),
+        "mag_y_counts":   safe_float(core.get("mag_y_counts")),
+        "mag_z_counts":   safe_float(core.get("mag_z_counts")),
+        "mag_norm_counts": safe_float(core.get("mag_norm_counts")),
+        "mag_norm_uT": (
+            safe_float(core.get("mag_norm_counts")) * AK09916_UT_PER_COUNT
+            if core.get("mag_norm_counts") is not None else None
+        ),
         "rf": {
             "24": pick_band("24"),
             "58": pick_band("58"),
         }
     }
+
     return jsonify({"ok": True, "latest": latest})
 
 
@@ -547,7 +604,15 @@ def api_series_gps():
 
     df = load_df(minutes=minutes, specific_day=day)
 
-    if df.empty or metric not in df.columns:
+    if df.empty:
+        return jsonify({"ok": True, "points": []})
+
+    # Alias retrocompatibile (nel caso arrivasse "mag_norm_uT" dall'interfaccia)
+    if metric == "mag_norm_ut" and "mag_norm_ut" not in df.columns and "mag_norm_counts" in df.columns:
+        df = df.copy()
+        df["mag_norm_ut"] = pd.to_numeric(df["mag_norm_counts"], errors="coerce") * AK09916_UT_PER_COUNT
+
+    if metric not in df.columns:
         return jsonify({"ok": True, "points": []})
 
     if day is not None:
@@ -588,6 +653,11 @@ def api_glossary():
         {"field":"scan_p50/p10/p90","label":"RSSI percentili","desc":"Distribuzione RSSI rilevata nello scan."},
         {"field":"tec","label":"TEC","desc":"Total Electron Content locale (TECU)."},
         {"field":"tec_source","label":"Sorgente TEC","desc":"Modello/servizio e timestamp del dato TEC."},
+        {"field":"t_c","label":"Temperatura (°C)","desc":"Temperatura ambiente locale dal sensore."},
+        {"field":"rh_pct","label":"Umidità (%)","desc":"Umidità relativa."},
+        {"field":"p_hpa","label":"Pressione (hPa)","desc":"Pressione atmosferica al livello del sensore."},
+        {"field":"mag_*_counts","label":"Magnetometro (counts)","desc":"Valori grezzi X/Y/Z e norma (per analisi differenziali)."},
+        {"field":"mag_norm_uT","label":"Campo magnetico (µT)","desc":"Norma del campo convertita in microtesla (≈0,15 µT/LSB)."},
     ]
     return jsonify({"ok": True, "items": G})
 

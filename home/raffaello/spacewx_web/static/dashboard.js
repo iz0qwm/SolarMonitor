@@ -329,7 +329,12 @@ async function refreshAll(){
       ['busy24',      loadSeries("busy_ratio", { band:"24", agg, window: win, minutes: minutesParam })],
       ['busy58',      loadSeries("busy_ratio", { band:"58", agg, window: win, minutes: minutesParam })],
       ['kp',          loadSeries("kp",        { minutes: minutesParam })],
-      ['track',       loadGpsTrack(shortM)]
+      ['track',       loadGpsTrack(shortM)],
+      ['temp',   loadSeriesGps("t_c",   { agg, window: win, minutes: minutesParam })],
+      ['hum',    loadSeriesGps("rh_pct",{ agg, window: win, minutes: minutesParam })],
+      ['press',  loadSeriesGps("p_hpa",{ agg, window: win, minutes: minutesParam })],
+      ['mag',    loadSeriesGps("mag_norm_ut",{ agg, window: win, minutes: minutesParam })],
+
     ];
 
     logLoading('Richieste inviate…');
@@ -364,6 +369,10 @@ async function refreshAll(){
         if (metr.endsWith('dop')) return v.toFixed(2);
         if (metr === 'sv_used') return v.toFixed(0);
         if (metr === 'tec') return v.toFixed(0) + ' TECu';
+        if (metr === 'mag_norm_ut') return v.toFixed(1) + ' µT';
+        if (metr === 't_c') return v.toFixed(1) + ' °C';
+        if (metr === 'rh_pct') return v.toFixed(1) + ' %';
+        if (metr === 'p_hpa') return v.toFixed(1) + ' hPa';
         return typeof v === 'number' ? v.toFixed(2) : String(v);
       };
 
@@ -377,7 +386,11 @@ async function refreshAll(){
         hdop:'HDOP', vdop:'VDOP', pdop:'PDOP',
         cn0_mean:'C/N₀',
         sv_used:'SV usati',
-        tec:'TEC'
+        tec:'TEC',
+        t_c:'Temperatura',
+        rh_pct:'Umidità',
+        p_hpa:'Pressione',
+        mag_norm_ut:'Magnetometro (µT)'
       }[m] || m);
 
       ev.forEach(row => {
@@ -391,7 +404,12 @@ async function refreshAll(){
         deltaCell.textContent = deltaTxt;
 
         // Colora Δ: peggio se >0 per noise/busy/DOP, meglio se >0 per C/N0/SV_used
-        const worseIfHigher = ['noise_dbm','busy_ratio','scan_p50','scan_p90','scan_p10','hdop','vdop','pdop','tec'];
+        const worseIfHigher = [
+          'noise_dbm','busy_ratio','scan_p50','scan_p90','scan_p10',
+          'hdop','vdop','pdop','tec',
+          // per condizioni avverse spesso il campo magnetico aumenta (µT) → peggio
+          'mag_norm_uT'
+        ];
         const betterIfHigher = ['cn0_mean','sv_used'];
         let severity = '';
         if (typeof delta === 'number') {
@@ -480,6 +498,12 @@ async function refreshAll(){
     upsertLine('busy24', 'busy ratio', R.busy24?.points || []);
     upsertLine('busy58', 'busy ratio', R.busy58?.points || []);
     upsertLine('kp',      'Kp',            R.kp?.points       || []);
+
+    // Grafici Meteo
+    upsertLine('temp',  'Temperatura °C',  R.temp?.points  || []);
+    upsertLine('hum',   'Umidità %',       R.hum?.points   || []);
+    upsertLine('press', 'Pressione hPa',   R.press?.points || []);
+    upsertLine('mag',   'Campo magnetico µT', R.mag?.points || []);
 
     // Mappa + trail
     ensureMap();

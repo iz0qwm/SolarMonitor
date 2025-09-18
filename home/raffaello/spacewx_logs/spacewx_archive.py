@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS raw (
   pdop REAL, hdop REAL, vdop REAL, sv_used INTEGER, sv_tot INTEGER, cn0_mean REAL,
   mode TEXT, freq INTEGER, noise_dbm REAL, busy_ratio REAL, 
   scan_n INTEGER, scan_p50 REAL, scan_p10 REAL, scan_p90 REAL, band TEXT,
-  tec REAL, tec_source TEXT
+  tec REAL, tec_source TEXT,
+  t_c REAL, rh_pct REAL, p_hpa REAL,
+  mag_x_counts REAL, mag_y_counts REAL, mag_z_counts REAL, mag_norm_counts REAL
 );
 CREATE INDEX IF NOT EXISTS idx_raw_ts ON raw(ts_iso);
 CREATE INDEX IF NOT EXISTS idx_raw_freq ON raw(freq);
@@ -44,7 +46,9 @@ def import_yesterday(conn):
         "pdop","hdop","vdop","sv_used","sv_tot","cn0_mean",
         "mode","freq","noise_dbm","busy_ratio",
         "scan_n","scan_p50","scan_p10","scan_p90","band",
-        "tec","tec_source"
+        "tec","tec_source","t_c","rh_pct","p_hpa",
+        "mag_x_counts","mag_y_counts","mag_z_counts","mag_norm_counts"
+
     ]
     y = datetime.now(timezone.utc) - timedelta(days=1)
     ypath = os.path.join(LOGDIR, "daily", y.strftime("%Y"), y.strftime("%m"),
@@ -81,7 +85,7 @@ def rollup(conn):
     SELECT substr(replace(ts_iso, '+00:00','Z'),1,13)||':00Z' AS hour_utc,
         AVG(kp), MAX(kp),
         AVG(tec), MAX(tec),
-        AVG(noise_dbm), AVG(busy_ratio)
+        AVG(noise_dbm), AVG(busy_ratio), AVG(t_c), AVG(rh_pct), AVG(p_hpa), AVG(mag_norm_counts)
     FROM raw
     WHERE ts_iso >= datetime('now','-40 days')
     GROUP BY 1
@@ -92,7 +96,7 @@ def rollup(conn):
     SELECT substr(replace(ts_iso, '+00:00','Z'),1,10) AS day_utc,
         AVG(kp), MAX(kp),
         AVG(tec), MAX(tec),
-        AVG(noise_dbm), AVG(busy_ratio)
+        AVG(noise_dbm), AVG(busy_ratio), AVG(t_c), AVG(rh_pct), AVG(p_hpa), AVG(mag_norm_counts)
     FROM raw
     GROUP BY 1
     """)

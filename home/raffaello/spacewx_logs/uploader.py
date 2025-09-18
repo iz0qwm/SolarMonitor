@@ -5,6 +5,17 @@ import yaml
 from google.cloud import firestore
 from google.oauth2 import service_account
 
+#
+# Magnetometro AK09916 (ICM-20948): ~0.15 µT per LSB
+# Override con env MAG_UT_PER_COUNT se vuoi calibrare finemente.
+#
+AK09916_UT_PER_COUNT = float(os.environ.get("MAG_UT_PER_COUNT", "0.15"))
+
+def _mag_norm_ut_from_latest(latest: dict) -> float | None:
+    n = _to_num(latest.get("mag_norm_counts"))
+    if n is None:
+        return None
+    return n * AK09916_UT_PER_COUNT
 
 def _extract_radio_fields(latest: dict) -> tuple[dict, str | None, int | None]:
     """
@@ -159,6 +170,8 @@ def write_status(fs, cfg, latest: dict):
         "createdAt": firestore.SERVER_TIMESTAMP,
     }, merge=True)
 
+    mag_ut = _mag_norm_ut_from_latest(latest)
+
     payload = {
         "online": True,
         "lastSeenAt": firestore.SERVER_TIMESTAMP,
@@ -174,6 +187,20 @@ def write_status(fs, cfg, latest: dict):
         **radio,
         "radio_mode": radio_mode,
         "radio_band": radio_band,
+        # ambientali
+        "t_c": _to_num(latest.get("t_c")),
+        "rh_pct": _to_num(latest.get("rh_pct")),
+        "p_hpa": _to_num(latest.get("p_hpa")),
+        # magnetometro (counts; utili per delte/baseline)
+        "mag_counts": {
+            "x": _to_num(latest.get("mag_x_counts")),
+            "y": _to_num(latest.get("mag_y_counts")),
+            "z": _to_num(latest.get("mag_z_counts")),
+            "norm": _to_num(latest.get("mag_norm_counts")),
+        },
+        # conversione in microtesla per uso diretto in grafici/alert
+        # nuovo nome coerente
+        "mag_ut": _to_num(mag_ut),
     }
     fs.document(f"{status_coll}/{sid}").set(payload, merge=True)
     print(f"[UP] wrote status to {status_coll}/{sid}")
@@ -225,8 +252,13 @@ def write_raw(fs, cfg, latest):
     # 3) path: measurements/{sensorId}/raw/{ts_iso} (idempotente sullo stesso ts)
     doc_path = f'{cfg["firestore"]["private_collection"]["raw"]}/{sid}/raw/{ts_iso}'
 
+    # Enrich: aggiungi anche la conversione in µT dentro al documento raw
+    mag_ut = _mag_norm_ut_from_latest(latest)
+
     payload = {
         **latest,                        # mantieni payload originale per massima tracciabilità
+        # nuovo nome coerente
+        "mag_norm_ut": _to_num(mag_ut),
         "ts": ts_dt,                     # datetime UTC (Firestore lo salva come Timestamp)
         "expiresAt": expires_at,         # campo su cui abiliteremo il TTL
         "ingestedAt": firestore.SERVER_TIMESTAMP,
