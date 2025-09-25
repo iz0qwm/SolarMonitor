@@ -258,7 +258,7 @@ def write_raw(fs, cfg, latest):
     payload = {
         **latest,                        # mantieni payload originale per massima tracciabilità
         # nuovo nome coerente
-        "mag_norm_ut": _to_num(mag_ut),
+        "mag_ut": _to_num(mag_ut),
         "ts": ts_dt,                     # datetime UTC (Firestore lo salva come Timestamp)
         "expiresAt": expires_at,         # campo su cui abiliteremo il TTL
         "ingestedAt": firestore.SERVER_TIMESTAMP,

@@ -8,13 +8,17 @@ from urllib.parse import quote  # in testa, vicino agli import
 from bisect import bisect_right
 import gzip, shutil
 from sensehat_b_reader import read_shtc3, read_lps22hb, read_icm20948_mag
+import logging
+from logging.handlers import RotatingFileHandler
 
-# Endpoint INGV (puoi sovrascriverlo via env se cambia)
-TEC_INGV_URL_TEMPLATE = os.environ.get(
-    "TEC_INGV_URL_TEMPLATE",
-    #"http://ws-eswua.rm.ingv.it/tecdb.php/records/wsnc_med?filter=dt,eq,{dt}"
-    "http://ws-eswua.rm.ingv.it/tecdb.php/records/wsnc_eu?filter=dt,eq,{dt}"
-)
+# Sorgenti INGV in ordine di tentativo.
+# Puoi cambiarlo via env: TEC_INGV_SOURCES="med,eu" oppure "eu,med"
+TEC_INGV_SOURCES = os.environ.get("TEC_INGV_SOURCES", "med,eu").split(",")
+
+TEC_ENDPOINTS = {
+    "eu":  "http://ws-eswua.rm.ingv.it/tecdb.php/records/wsnc_eu?filter=dt,eq,{dt}",
+    "med": "http://ws-eswua.rm.ingv.it/tecdb.php/records/wsnc_med?filter=dt,eq,{dt}",
+}
 
 LOGDIR = os.path.expanduser("~/spacewx_logs"); os.makedirs(LOGDIR, exist_ok=True)
 CSV = os.path.join(LOGDIR, "wifi_gps_kp_qos.csv")
@@ -29,6 +33,25 @@ KP_URL = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
 RAW_KEEP_DAYS = int(os.environ.get("RAW_KEEP_DAYS", "7"))   # giorni di raw da tenere
 LOGDIR = os.path.expanduser("~/spacewx_logs")               # già definito nel tuo file
 BASE = "wifi_gps_kp_qos"
+
+
+# --- Logging configurabile ---
+TEC_DEBUG = os.environ.get("TEC_DEBUG", "0") == "1"
+TEC_LOGFILE = os.path.join(LOGDIR, "tec_debug.log")
+
+logger = logging.getLogger("tec")
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG if TEC_DEBUG else logging.INFO)
+    h = RotatingFileHandler(TEC_LOGFILE, maxBytes=2_000_000, backupCount=3)
+    h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(h)
+
+def log(msg, lvl="info"):
+    fn = getattr(logger, lvl, logger.info)
+    fn(str(msg))
+    # echo anche a stdout se debug
+    if TEC_DEBUG:
+        print(str(msg))
 
 # --- aggiungi vicino agli import/util ---
 def _safe_float(x):
@@ -95,57 +118,67 @@ def fmt_slot(dt_utc):
 
 
 _INGV_TRIES = int(os.environ.get("TEC_INGV_TRIES", "3"))  # slot da provare: t-0, t-10, t-20...
-_ingv_cache = {}  # rimane
+# cache separata per endpoint+slot
+_ingv_cache = {}  # chiave: (src_key, dt_str)
 
 def _fetch_one_slot(dt_str):
-    # cache per singolo slot
     if dt_str in _ingv_cache:
+        log(f"[TEC] cache HIT for slot {dt_str}")
         return _ingv_cache[dt_str]
 
     url = TEC_INGV_URL_TEMPLATE.format(dt=quote(dt_str))
-    # log URL interrogato
-    print(f"[TEC] GET {url}")
+    log(f"[TEC] GET {url}")
 
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "spacewx-logger/1.0"})
         with urllib.request.urlopen(req, timeout=8) as r:
-            payload = json.loads(r.read().decode())
+            raw = r.read().decode()
+            payload = json.loads(raw)
+            # salva ultimo payload per debug
+            try:
+                with open("/tmp/ingv_last.json", "w") as fo:
+                    fo.write(raw)
+            except Exception as ee:
+                log(f"[TEC] cannot dump /tmp/ingv_last.json: {ee}", "warning")
     except Exception as e:
-        print(f"[TEC] ERROR fetch {dt_str}: {e}")
+        log(f"[TEC] ERROR fetch dt={dt_str}: {repr(e)}", "error")
         return None
 
     recs = payload.get("records") or []
-    print(f"[TEC] slot {dt_str} → records={len(recs)}")
+    log(f"[TEC] slot {dt_str} → records={len(recs)}")
 
     if not recs:
         return None
 
     jfile = recs[0].get("jfile")
     if not jfile:
-        print(f"[TEC] slot {dt_str} has empty jfile")
+        log(f"[TEC] slot {dt_str} has empty jfile", "warning")
         return None
 
     try:
         points = json.loads(jfile)
     except Exception as e:
-        print(f"[TEC] JSON error in jfile: {e}")
+        log(f"[TEC] JSON error in jfile: {repr(e)}", "error")
         return None
 
     grid = {}
-    lats = set()
-    lons = set()
+    lats = set(); lons = set()
+    dropped = 0
     for p in points:
         try:
             la = round(float(p["lat"]), 2)
             lo = round(float(p["lon"]), 2)
             tec = float(p["tec"])
+            grid[(la, lo)] = tec
+            lats.add(la); lons.add(lo)
         except Exception:
-            continue
-        grid[(la, lo)] = tec
-        lats.add(la); lons.add(lo)
+            dropped += 1
+
+    if dropped:
+        log(f"[TEC] dropped {dropped} malformed points", "warning")
 
     if not grid:
-        print(f"[TEC] slot {dt_str} parsed but grid is empty")
+        log(f"[TEC] slot {dt_str} parsed but grid is EMPTY", "warning")
         return None
 
     obj = {"grid": grid, "lats": sorted(lats), "lons": sorted(lons)}
@@ -161,66 +194,138 @@ def _fetch_one_slot(dt_str):
     lo0, lo1 = obj["lons"][0], obj["lons"][-1]
     step_lat = _approx_step(obj["lats"])
     step_lon = _approx_step(obj["lons"])
-    print(f"[TEC] grid lat[{la0}..{la1}] lon[{lo0}..{lo1}] step≈{step_lat}°×{step_lon}° (n={len(obj['lats'])}x{len(obj['lons'])})")
+    log(f"[TEC] grid lat[{la0}..{la1}] lon[{lo0}..{lo1}] step≈{step_lat}°×{step_lon}° (n={len(obj['lats'])}×{len(obj['lons'])})")
 
     _ingv_cache[dt_str] = obj
-
-    # log bounds e step
-    la0, la1 = obj["lats"][0], obj["lats"][-1]
-    lo0, lo1 = obj["lons"][0], obj["lons"][-1]
-    print(f"[TEC] grid lat[{la0}..{la1}] lon[{lo0}..{lo1}] step≈0.1° (n={len(obj['lats'])}x{len(obj['lons'])})")
     return obj
 
-def fetch_ingv_grid_multi(dt_utc):
-    # prova lo slot corrente (floored), poi indietro di 10 e 20 minuti
-    tried = 0
-    dt_try = floor_to_10min(dt_utc)
-    while tried < _INGV_TRIES:
-        dt_str = fmt_slot(dt_try)
-        obj = _fetch_one_slot(dt_str)
-        if obj:
-            return obj, dt_str
-        # fallback di 10 minuti
-        dt_try = dt_try - timedelta(minutes=10)
-        tried += 1
+
+def _fetch_one_slot_from(src_key, dt_str):
+    """Scarica e parse una singola finestra temporale da una sorgente (eu/med)"""
+    cache_key = (src_key, dt_str)
+    if cache_key in _ingv_cache:
+        log(f"[TEC] cache HIT for {src_key}@{dt_str}")
+        return _ingv_cache[cache_key]
+
+    tpl = TEC_ENDPOINTS.get(src_key)
+    if not tpl:
+        log(f"[TEC] unknown src '{src_key}'", "warning")
+        return None
+
+    url = tpl.format(dt=quote(dt_str))
+    log(f"[TEC] GET {src_key}: {url}")
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "spacewx-logger/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            raw = r.read().decode()
+            payload = json.loads(raw)
+            try:
+                with open("/tmp/ingv_last.json", "w") as fo:
+                    fo.write(raw)
+            except Exception as ee:
+                log(f"[TEC] cannot dump /tmp/ingv_last.json: {ee}", "warning")
+    except Exception as e:
+        log(f"[TEC] ERROR fetch {src_key} dt={dt_str}: {repr(e)}", "error")
+        return None
+
+    recs = payload.get("records") or []
+    log(f"[TEC] {src_key} slot {dt_str} → records={len(recs)}")
+    if not recs:
+        return None
+
+    jfile = recs[0].get("jfile")
+    if not jfile:
+        log(f"[TEC] {src_key} slot {dt_str} has empty jfile", "warning")
+        return None
+
+    try:
+        points = json.loads(jfile)
+    except Exception as e:
+        log(f"[TEC] JSON error in jfile ({src_key}): {repr(e)}", "error")
+        return None
+
+    grid = {}
+    lats = set(); lons = set()
+    dropped = 0
+    for p in points:
+        try:
+            la = round(float(p["lat"]), 2)
+            lo = round(float(p["lon"]), 2)
+            tec = float(p["tec"])
+            grid[(la, lo)] = tec
+            lats.add(la); lons.add(lo)
+        except Exception:
+            dropped += 1
+    if dropped:
+        log(f"[TEC] {src_key} dropped {dropped} malformed points", "warning")
+    if not grid:
+        log(f"[TEC] {src_key} slot {dt_str} parsed but grid is EMPTY", "warning")
+        return None
+
+    obj = {"grid": grid, "lats": sorted(lats), "lons": sorted(lons), "src": src_key}
+    _ingv_cache[cache_key] = obj
+
+    # log dimensioni griglia
+    def _step(vals):
+        if len(vals) < 2: return None
+        diffs = [round(vals[i+1] - vals[i], 6) for i in range(len(vals)-1)]
+        diffs = [d for d in diffs if d > 0]
+        diffs.sort()
+        return diffs[len(diffs)//2] if diffs else None
+
+    la0, la1 = obj["lats"][0], obj["lats"][-1]
+    lo0, lo1 = obj["lons"][0], obj["lons"][-1]
+    log(f"[TEC] {src_key} grid lat[{la0}..{la1}] lon[{lo0}..{lo1}] "
+        f"step≈{_step(obj['lats'])}°×{_step(obj['lons'])}° "
+        f"(n={len(obj['lats'])}×{len(obj['lons'])})")
+    return obj
+
+
+def fetch_ingv_grid_multi(dt):
+    """Prova i tre slot (t, t-10, t-20) e più sorgenti (ordine in TEC_INGV_SOURCES)."""
+    base = floor_to_10min(dt)
+    slots = [fmt_slot(base), fmt_slot(base - timedelta(minutes=10)), fmt_slot(base - timedelta(minutes=20))]
+    for dt_str in slots:
+        for src in [s.strip() for s in TEC_INGV_SOURCES if s.strip()]:
+            obj = _fetch_one_slot_from(src, dt_str)
+            if obj:
+                return obj, dt_str
+    # log finale più esplicito
+    log(f"[TEC] no grid for {fmt_slot(base)}Z (tried slots={slots} sources={TEC_INGV_SOURCES})", "warning")
     return None, None
+
 
 def bilinear_tec(grid_obj, lat, lon):
     if not grid_obj or lat is None or lon is None:
+        log(f"[TEC] bilinear_tec called with empty grid or coords", "warning")
         return None
 
-    lats = grid_obj["lats"]
-    lons = grid_obj["lons"]
-    grid = grid_obj["grid"]
+    lats = grid_obj["lats"]; lons = grid_obj["lons"]; grid = grid_obj["grid"]
 
-    # fuori dai bounds
     if not (lats[0] <= lat <= lats[-1] and lons[0] <= lon <= lons[-1]):
-        print(f"[TEC] point lat={lat:.6f} lon={lon:.6f} OUTSIDE grid bounds")
+        log(f"[TEC] point OUTSIDE grid: lat={lat:.6f} lon={lon:.6f} "
+            f"vs lat[{lats[0]}..{lats[-1]}] lon[{lons[0]}..{lons[-1]}]", "warning")
         return None
 
-    # trova gli indici inferiori (i,j) tali che lats[i] <= lat < lats[i+1]
     i = bisect_right(lats, lat) - 1
     j = bisect_right(lons, lon) - 1
-    # clamp agli estremi
-    if i < 0: i = 0
-    if i >= len(lats)-1: i = len(lats)-2
-    if j < 0: j = 0
-    if j >= len(lons)-1: j = len(lons)-2
+    i = max(0, min(i, len(lats)-2))
+    j = max(0, min(j, len(lons)-2))
 
     lat0, lat1 = lats[i], lats[i+1]
     lon0, lon1 = lons[j], lons[j+1]
 
-    # prova i 4 vicini
     q = {}
     for (la, lo) in ((lat0,lon0),(lat1,lon0),(lat0,lon1),(lat1,lon1)):
         if (round(la,2), round(lo,2)) in grid:
             q[(la,lo)] = grid[(round(la,2), round(lo,2))]
 
     if len(q) == 4:
-        print(f"[TEC] bilinear neighbors: ({lat0},{lon0})={q[(lat0,lon0)]}  "
-              f"({lat1},{lon0})={q[(lat1,lon0)]}  "
-              f"({lat0},{lon1})={q[(lat0,lon1)]}  "
-              f"({lat1},{lon1})={q[(lat1,lon1)]}")
+        log(f"[TEC] bilinear neighbors: ({lat0},{lon0})={q[(lat0,lon0)]} | "
+            f"({lat1},{lon0})={q[(lat1,lon0)]} | "
+            f"({lat0},{lon1})={q[(lat0,lon1)]} | "
+            f"({lat1},{lon1})={q[(lat1,lon1)]}")
         tx = 0.0 if lat1 == lat0 else (lat - lat0) / (lat1 - lat0)
         ty = 0.0 if lon1 == lon0 else (lon - lon0) / (lon1 - lon0)
         tec = (q[(lat0,lon0)]*(1-tx)*(1-ty) +
@@ -228,6 +333,25 @@ def bilinear_tec(grid_obj, lat, lon):
                q[(lat0,lon1)]*(1-tx)*ty +
                q[(lat1,lon1)]*tx*ty)
         return round(tec, 2)
+
+    # fallback NN
+    candidates = []
+    for (la, lo) in ((lat0,lon0),(lat1,lon0),(lat0,lon1),(lat1,lon1)):
+        key = (round(la,2), round(lo,2))
+        if key in grid:
+            d2 = (la - lat)**2 + (lo - lon)**2
+            candidates.append((d2, la, lo, grid[key]))
+
+    if not candidates:
+        for (la, lo), val in grid.items():
+            d2 = (la - lat)**2 + (lo - lon)**2
+            candidates.append((d2, la, lo, val))
+
+    candidates.sort(key=lambda x: x[0])
+    _, la, lo, val = candidates[0]
+    log(f"[TEC] NN fallback → ({la},{lo}) tec={val}")
+    return round(val, 2)
+
 
     # fallback: se manca qualcosa, usa il nearest neighbor tra i 4 previsti (o tra tutti se serve)
     candidates = []
@@ -252,33 +376,34 @@ def bilinear_tec(grid_obj, lat, lon):
 
 
 def get_tec_for(lat, lon, ts_iso):
-    # normalizza input
-    lat_f = _safe_float(lat)
-    lon_f = _safe_float(lon)
+    lat_f = _safe_float(lat); lon_f = _safe_float(lon)
     if lat_f is None or lon_f is None:
-        # niente posizione → niente TEC
         return (None, None)
     if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+        log(f"[TEC] invalid coords lat={lat} lon={lon}", "warning")
         return (None, None)
 
-    # normalizza timestamp
     try:
         dt = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).astimezone(timezone.utc)
     except Exception:
         dt = datetime.now(timezone.utc)
 
-    print(f"[TEC] request lat={lat_f:.6f} lon={lon_f:.6f} at {fmt_slot(dt)}Z")
+    log(f"[TEC] request lat={lat_f:.6f} lon={lon_f:.6f} at {fmt_slot(dt)}Z")
 
     obj, dt_str = fetch_ingv_grid_multi(dt)
     if not obj:
-        print(f"[TEC] no grid available for {fmt_slot(floor_to_10min(dt))}Z (tried {_INGV_TRIES} slots back)")
+        log(f"[TEC] no grid for {fmt_slot(floor_to_10min(dt))}Z (tried {_INGV_TRIES} slots)", "warning")
         return (None, None)
 
     tec = bilinear_tec(obj, round(lat_f, 6), round(lon_f, 6))
     if tec is None:
+        log(f"[TEC] interpolation returned None for lat={lat_f} lon={lon_f}", "warning")
         return (None, None)
 
-    return (tec, f"ingv-wsnc_med@{dt_str}")
+    src_suffix = f"wsnc_{obj.get('src','?')}"
+    return (tec, f"ingv-{src_suffix}@{dt_str}")
+
+
 
 
 
@@ -532,7 +657,7 @@ def main():
         else:
             tec_val, tec_src = get_tec_for(lat, lon, ts)
 
-        print(f"[TEC] value={tec_val} source={tec_src}")
+        log(f"[TEC] value={tec_val} source={tec_src}")
 
         # 5a) Lettura parametri da SenseHAT B
         # Letture Sense HAT B (t/rh/p + magnetometro)
@@ -588,4 +713,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) >= 3 and sys.argv[1] == "--tec-test":
+        lat = float(sys.argv[2]); lon = float(sys.argv[3])
+        ts = sys.argv[4] if len(sys.argv) >= 5 else now_iso()
+        TEC_DEBUG = True  # forza echo
+        val, src = get_tec_for(lat, lon, ts)
+        print(f"TEC={val} src={src}")
+    else:
+        main()
+
